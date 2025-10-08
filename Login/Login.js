@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import Register from './Register';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   StyleSheet,
   Text,
@@ -10,7 +12,6 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const AUTH_KEY = 'userToken';
 
@@ -19,6 +20,7 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState(null);
+  const [showRegister, setShowRegister] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -78,6 +80,19 @@ export default function Login() {
     );
   }
 
+  if (showRegister) {
+    return (
+      <Register
+        onRegistered={(user) => {
+          // set the logged in user in parent logic you already have
+          setUser(user);
+          setShowRegister(false);
+        }}
+        onCancel={() => setShowRegister(false)}
+      />
+    );
+  }
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -101,6 +116,9 @@ export default function Login() {
       />
       <TouchableOpacity style={styles.button} onPress={signIn}>
         <Text style={styles.buttonText}>Sign In</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={[styles.button, { backgroundColor: '#fff', borderWidth: 0 }]} onPress={() => setShowRegister(true)}>
+        <Text style={[styles.buttonText, { color: '#007AFF' }]}>Create account</Text>
       </TouchableOpacity>
     </KeyboardAvoidingView>
   );
