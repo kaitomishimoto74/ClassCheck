@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Register from './Register';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -11,6 +11,8 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Animated,
+  Easing,
 } from 'react-native';
 
 const AUTH_KEY = 'userToken';
@@ -23,12 +25,15 @@ export default function Login() {
   const [user, setUser] = useState(null);
   const [showRegister, setShowRegister] = useState(false);
 
+  const shakeAnim = useRef(new Animated.Value(0)).current;
+  const fadeInAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.9)).current;
+
   useEffect(() => {
     (async () => {
       try {
         const token = await AsyncStorage.getItem(AUTH_KEY);
         if (token) {
-          // try to load user details from stored users
           const raw = await AsyncStorage.getItem(USERS_KEY);
           const users = raw ? JSON.parse(raw) : {};
           const details = users[token];
@@ -39,42 +44,59 @@ export default function Login() {
           }
         }
       } catch (e) {
-        /* ignore for demo */
+        // ignore
       } finally {
         setLoading(false);
+        Animated.parallel([
+          Animated.timing(fadeInAnim, {
+            toValue: 1,
+            duration: 500,
+            useNativeDriver: true,
+          }),
+          Animated.spring(scaleAnim, {
+            toValue: 1,
+            friction: 6,
+            useNativeDriver: true,
+          }),
+        ]).start();
       }
     })();
   }, []);
 
+  const triggerShake = () => {
+    shakeAnim.setValue(0);
+    Animated.sequence([
+      Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 6, duration: 50, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -6, duration: 50, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: true }),
+    ]).start();
+  };
+
   const signIn = async () => {
     if (!email || !password) {
+      triggerShake();
       Alert.alert('Validation', 'Please enter email and password');
       return;
     }
     setLoading(true);
-
     try {
       const raw = await AsyncStorage.getItem(USERS_KEY);
       const users = raw ? JSON.parse(raw) : {};
-
       const account = users[email];
-      if (!account) {
-        Alert.alert('Authentication failed', 'No account found for this email.');
+
+      if (!account || account.password !== password) {
+        triggerShake();
+        Alert.alert('Authentication failed', 'Invalid email or password.');
         setLoading(false);
         return;
       }
 
-      if (account.password !== password) {
-        Alert.alert('Authentication failed', 'Invalid credentials.');
-        setLoading(false);
-        return;
-      }
-
-      // success: persist auth token and set user
       await AsyncStorage.setItem(AUTH_KEY, email);
       setUser({ email, name: account.name });
     } catch (err) {
-      Alert.alert('Error', 'Unable to sign in. Try again.');
+      Alert.alert('Error', 'Login failed. Try again.');
     } finally {
       setLoading(false);
     }
@@ -90,7 +112,7 @@ export default function Login() {
   if (loading) {
     return (
       <View style={styles.container}>
-        <ActivityIndicator size="large" />
+        <ActivityIndicator size="large" color="#FF69B4" />
       </View>
     );
   }
@@ -98,9 +120,9 @@ export default function Login() {
   if (user) {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Dashboard</Text>
-        <Text style={styles.sub}>Welcome, {user.name ?? user.email}</Text>
-        <Text style={{ marginBottom: 20, color: '#666' }}>This is a simple dashboard placeholder.</Text>
+        <Text style={styles.title}>Welcome 🎉</Text>
+        <Text style={styles.sub}>Hello, {user.name ?? user.email}</Text>
+        <Text style={{ marginBottom: 20, color: '#666' }}>You're logged in!</Text>
         <TouchableOpacity style={styles.button} onPress={signOut}>
           <Text style={styles.buttonText}>Logout</Text>
         </TouchableOpacity>
@@ -112,7 +134,6 @@ export default function Login() {
     return (
       <Register
         onRegistered={(user) => {
-          // user object from Register: { email, name }
           setUser(user);
           setShowRegister(false);
         }}
@@ -126,28 +147,47 @@ export default function Login() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <Text style={styles.title}>Login</Text>
-      <TextInput
-        value={email}
-        onChangeText={setEmail}
-        placeholder="Email"
-        style={styles.input}
-        keyboardType="email-address"
-        autoCapitalize="none"
-      />
-      <TextInput
-        value={password}
-        onChangeText={setPassword}
-        placeholder="Password"
-        style={styles.input}
-        secureTextEntry
-      />
-      <TouchableOpacity style={styles.button} onPress={signIn}>
-        <Text style={styles.buttonText}>Sign In</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={[styles.button, { backgroundColor: '#fff', borderWidth: 0 }]} onPress={() => setShowRegister(true)}>
-        <Text style={[styles.buttonText, { color: '#007AFF' }]}>Create account</Text>
-      </TouchableOpacity>
+      <Animated.View
+        style={[
+          styles.card,
+          {
+            opacity: fadeInAnim,
+            transform: [{ translateX: shakeAnim }, { scale: scaleAnim }],
+          },
+        ]}
+      >
+        <Text style={styles.title}>Login</Text>
+
+        <TextInput
+          value={email}
+          onChangeText={setEmail}
+          placeholder="Email"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
+
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          secureTextEntry
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
+
+        <TouchableOpacity style={styles.button} onPress={signIn}>
+          <Text style={styles.buttonText}>Sign In</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, styles.secondaryButton]}
+          onPress={() => setShowRegister(true)}
+        >
+          <Text style={styles.secondaryText}>Create account</Text>
+        </TouchableOpacity>
+      </Animated.View>
     </KeyboardAvoidingView>
   );
 }
@@ -155,41 +195,63 @@ export default function Login() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
+    backgroundColor: '#FFF0F5', // light pink background
     justifyContent: 'center',
+    alignItems: 'center',
     padding: 20,
+  },
+  card: {
+    width: '100%',
+    backgroundColor: '#fff',
+    padding: 24,
+    borderRadius: 16,
+    shadowColor: '#FF69B4',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 8,
   },
   title: {
     fontSize: 28,
-    marginBottom: 12,
-    fontWeight: '600',
+    fontWeight: '700',
+    color: '#FF69B4',
+    textAlign: 'center',
+    marginBottom: 20,
   },
   sub: {
     fontSize: 16,
-    marginBottom: 20,
-    color: '#333',
+    color: '#444',
+    marginBottom: 10,
   },
   input: {
     width: '100%',
-    height: 48,
-    borderColor: '#ccc',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginBottom: 12,
+    fontSize: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 2,
+    borderColor: '#FF69B4',
+    marginBottom: 20,
+    color: '#333',
   },
   button: {
-    width: '100%',
-    height: 48,
-    backgroundColor: '#007AFF',
-    borderRadius: 8,
+    backgroundColor: '#FF69B4',
+    paddingVertical: 14,
+    borderRadius: 12,
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 6,
+    marginTop: 8,
   },
   buttonText: {
     color: '#fff',
     fontWeight: '600',
+    fontSize: 16,
+  },
+  secondaryButton: {
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#FF69B4',
+  },
+  secondaryText: {
+    color: '#FF69B4',
+    fontWeight: '600',
+    fontSize: 16,
   },
 });

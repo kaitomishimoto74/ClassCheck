@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Animated,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -21,6 +22,24 @@ export default function Register({ onRegistered, onCancel }) {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const fadeInAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.9)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeInAnim, {
+        toValue: 1,
+        duration: 500,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleAnim, {
+        toValue: 1,
+        friction: 6,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, []);
 
   const validateEmail = (e) => /\S+@\S+\.\S+/.test(e);
 
@@ -53,13 +72,10 @@ export default function Register({ onRegistered, onCancel }) {
         return;
       }
 
-      // NOTE: this example stores passwords in plain text for demo purposes.
-      // Replace with proper hashing and secure backend for production.
       users[email] = { name: name.trim(), password };
       await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-
-      // Auto-login after registration
       await AsyncStorage.setItem(AUTH_KEY, email);
+
       if (onRegistered) onRegistered({ email, name: name.trim() });
     } catch (err) {
       Alert.alert('Error', 'Unable to register. Try again.');
@@ -71,7 +87,7 @@ export default function Register({ onRegistered, onCancel }) {
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" />
+        <ActivityIndicator size="large" color="#FF69B4" />
       </View>
     );
   }
@@ -81,79 +97,124 @@ export default function Register({ onRegistered, onCancel }) {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <Text style={styles.title}>Create account</Text>
+      <Animated.View
+        style={[
+          styles.card,
+          {
+            opacity: fadeInAnim,
+            transform: [{ scale: scaleAnim }],
+          },
+        ]}
+      >
+        <Text style={styles.title}>Create Account</Text>
 
-      <TextInput
-        value={name}
-        onChangeText={setName}
-        placeholder="Full name"
-        style={styles.input}
-        autoCapitalize="words"
-      />
-      <TextInput
-        value={email}
-        onChangeText={setEmail}
-        placeholder="Email"
-        style={styles.input}
-        keyboardType="email-address"
-        autoCapitalize="none"
-      />
-      <TextInput
-        value={password}
-        onChangeText={setPassword}
-        placeholder="Password"
-        style={styles.input}
-        secureTextEntry
-      />
-      <TextInput
-        value={confirm}
-        onChangeText={setConfirm}
-        placeholder="Confirm password"
-        style={styles.input}
-        secureTextEntry
-      />
+        <TextInput
+          value={name}
+          onChangeText={setName}
+          placeholder="Full Name"
+          style={styles.input}
+          autoCapitalize="words"
+          placeholderTextColor="#999"
+        />
+        <TextInput
+          value={email}
+          onChangeText={setEmail}
+          placeholder="Email"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          secureTextEntry
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
+        <TextInput
+          value={confirm}
+          onChangeText={setConfirm}
+          placeholder="Confirm Password"
+          secureTextEntry
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
 
-      <TouchableOpacity style={styles.button} onPress={register}>
-        <Text style={styles.buttonText}>Register</Text>
-      </TouchableOpacity>
+        <TouchableOpacity style={styles.button} onPress={register}>
+          <Text style={styles.buttonText}>Register</Text>
+        </TouchableOpacity>
 
-      <TouchableOpacity style={[styles.button, styles.ghost]} onPress={onCancel}>
-        <Text style={[styles.buttonText, styles.ghostText]}>Back to login</Text>
-      </TouchableOpacity>
+        <TouchableOpacity style={[styles.button, styles.secondaryButton]} onPress={onCancel}>
+          <Text style={styles.secondaryText}>Back to Login</Text>
+        </TouchableOpacity>
+      </Animated.View>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFF0F5',
+  },
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
+    backgroundColor: '#FFF0F5',
     justifyContent: 'center',
+    alignItems: 'center',
     padding: 20,
-    width: '100%',
   },
-  title: { fontSize: 26, marginBottom: 12, fontWeight: '600' },
+  card: {
+    width: '100%',
+    backgroundColor: '#fff',
+    padding: 24,
+    borderRadius: 16,
+    shadowColor: '#FF69B4',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#FF69B4',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
   input: {
     width: '100%',
-    height: 48,
-    borderColor: '#ccc',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginBottom: 12,
+    fontSize: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 2,
+    borderColor: '#FF69B4',
+    marginBottom: 20,
+    color: '#333',
   },
   button: {
-    width: '100%',
-    height: 48,
-    backgroundColor: '#007AFF',
-    borderRadius: 8,
+    backgroundColor: '#FF69B4',
+    paddingVertical: 14,
+    borderRadius: 12,
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 6,
+    marginTop: 8,
   },
-  buttonText: { color: '#fff', fontWeight: '600' },
-  ghost: { backgroundColor: 'transparent', borderWidth: 0, marginTop: 8 },
-  ghostText: { color: '#007AFF' },
+  buttonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  secondaryButton: {
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#FF69B4',
+  },
+  secondaryText: {
+    color: '#FF69B4',
+    fontWeight: '600',
+    fontSize: 16,
+  },
 });
