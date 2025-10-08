@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 
 const AUTH_KEY = 'userToken';
+const USERS_KEY = 'users';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -26,7 +27,17 @@ export default function Login() {
     (async () => {
       try {
         const token = await AsyncStorage.getItem(AUTH_KEY);
-        if (token) setUser({ email: token });
+        if (token) {
+          // try to load user details from stored users
+          const raw = await AsyncStorage.getItem(USERS_KEY);
+          const users = raw ? JSON.parse(raw) : {};
+          const details = users[token];
+          if (details) {
+            setUser({ email: token, name: details.name });
+          } else {
+            setUser({ email: token });
+          }
+        }
       } catch (e) {
         /* ignore for demo */
       } finally {
@@ -41,16 +52,32 @@ export default function Login() {
       return;
     }
     setLoading(true);
-    // Demo auth: accept password === 'password'
-    setTimeout(async () => {
-      if (password === 'password') {
-        await AsyncStorage.setItem(AUTH_KEY, email);
-        setUser({ email });
-      } else {
-        Alert.alert('Authentication failed', 'Invalid credentials. For demo use password "password".');
+
+    try {
+      const raw = await AsyncStorage.getItem(USERS_KEY);
+      const users = raw ? JSON.parse(raw) : {};
+
+      const account = users[email];
+      if (!account) {
+        Alert.alert('Authentication failed', 'No account found for this email.');
+        setLoading(false);
+        return;
       }
+
+      if (account.password !== password) {
+        Alert.alert('Authentication failed', 'Invalid credentials.');
+        setLoading(false);
+        return;
+      }
+
+      // success: persist auth token and set user
+      await AsyncStorage.setItem(AUTH_KEY, email);
+      setUser({ email, name: account.name });
+    } catch (err) {
+      Alert.alert('Error', 'Unable to sign in. Try again.');
+    } finally {
       setLoading(false);
-    }, 700);
+    }
   };
 
   const signOut = async () => {
@@ -71,8 +98,9 @@ export default function Login() {
   if (user) {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Welcome</Text>
-        <Text style={styles.sub}>{user.email}</Text>
+        <Text style={styles.title}>Dashboard</Text>
+        <Text style={styles.sub}>Welcome, {user.name ?? user.email}</Text>
+        <Text style={{ marginBottom: 20, color: '#666' }}>This is a simple dashboard placeholder.</Text>
         <TouchableOpacity style={styles.button} onPress={signOut}>
           <Text style={styles.buttonText}>Logout</Text>
         </TouchableOpacity>
@@ -84,7 +112,7 @@ export default function Login() {
     return (
       <Register
         onRegistered={(user) => {
-          // set the logged in user in parent logic you already have
+          // user object from Register: { email, name }
           setUser(user);
           setShowRegister(false);
         }}
