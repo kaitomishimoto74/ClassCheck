@@ -1,0 +1,1 @@
+kanang AppjsUnta mao na ag appjs nako akoa ra tryan ug butang nas log in para inag log in mo automatic na nga sud if student ka mmo sud ka dayun sa student dashboard and mao pud if teacher sa teacherdashboard pd ka ma dubg
