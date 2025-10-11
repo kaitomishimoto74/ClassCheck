@@ -1,22 +1,26 @@
-import React from 'react';
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
-import Login from './Login/Login';
+import * as React from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createStackNavigator } from '@react-navigation/stack';
+import ChatBox from './PayotChatBox/ChatBox';
+import ChatList from './PayotChatBox/ChatList';
+
+const Stack = createStackNavigator();
 
 export default function App() {
   return (
-    <View style={styles.container}>
-      <Login />
-      <StatusBar style="auto" />
-    </View>
+    <NavigationContainer>
+      <Stack.Navigator initialRouteName="ChatList">
+        <Stack.Screen 
+          name="ChatList" 
+          component={ChatList} 
+          options={{ title: 'Chat List' }}
+        />
+        <Stack.Screen 
+          name="ChatBox" 
+          component={ChatBox} 
+          options={({ route }) => ({ title: route.params.name })}
+        />
+      </Stack.Navigator>
+    </NavigationContainer>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
