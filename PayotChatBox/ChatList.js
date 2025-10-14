@@ -1,8 +1,8 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, FlatList, StyleSheet, Image } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 
 const ChatList = ({ navigation }) => {
-  // Temporary static data (replace later with real data from backend)
   const chats = [
     { id: '1', teacherName: 'Mr. Santos', subjectName: 'Mathematics', image: null },
     { id: '2', teacherName: 'Ms. Cruz', subjectName: 'English', image: null },
@@ -10,7 +10,6 @@ const ChatList = ({ navigation }) => {
   ];
 
   const renderItem = ({ item }) => {
-    // Get initials for fallback avatar
     const initials = item.teacherName
       .split(' ')
       .map(word => word[0])
@@ -18,7 +17,7 @@ const ChatList = ({ navigation }) => {
 
     return (
       <TouchableOpacity
-        style={styles.card}
+        activeOpacity={0.85}
         onPress={() =>
           navigation.navigate('ChatBox', {
             teacherName: item.teacherName,
@@ -26,70 +25,83 @@ const ChatList = ({ navigation }) => {
           })
         }
       >
-        {item.image ? (
-          <Image source={{ uri: item.image }} style={styles.avatar} />
-        ) : (
-          <View style={styles.avatarPlaceholder}>
-            <Text style={styles.avatarText}>{initials}</Text>
-          </View>
-        )}
+        <View style={styles.card}>
+          {item.image ? (
+            <Image source={{ uri: item.image }} style={styles.avatar} />
+          ) : (
+            <LinearGradient
+              colors={['#2196F3', '#64B5F6']}
+              style={styles.avatarPlaceholder}
+            >
+              <Text style={styles.avatarText}>{initials}</Text>
+            </LinearGradient>
+          )}
 
-        <View style={styles.textContainer}>
-          <Text style={styles.teacherName}>{item.teacherName}</Text>
-          <Text style={styles.subjectName}>{item.subjectName}</Text>
+          <View style={styles.textContainer}>
+            <Text style={styles.teacherName}>{item.teacherName}</Text>
+            <Text style={styles.subjectName}>{item.subjectName}</Text>
+          </View>
         </View>
       </TouchableOpacity>
     );
   };
 
   return (
-    <View style={styles.container}>
+    <LinearGradient
+      colors={['#E3F2FD', '#BBDEFB']}
+      style={styles.container}
+    >
       <Text style={styles.header}>Messages</Text>
-      <FlatList data={chats} renderItem={renderItem} keyExtractor={(item) => item.id} />
-    </View>
+      <FlatList
+        data={chats}
+        renderItem={renderItem}
+        keyExtractor={(item) => item.id}
+        showsVerticalScrollIndicator={false}
+      />
+    </LinearGradient>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFF0F5',
-    padding: 15
+    padding: 20
   },
   header: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#FF69B4',
-    marginBottom: 15
+    fontSize: 28,
+    fontWeight: '800',
+    color: '#0D47A1',
+    marginBottom: 20,
+    textAlign: 'center',
+    letterSpacing: 1
   },
   card: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#FFFFFF',
     padding: 15,
-    borderRadius: 12,
-    marginBottom: 10,
-    shadowColor: '#FF69B4',
-    shadowOpacity: 0.15,
+    borderRadius: 18,
+    marginBottom: 12,
+    shadowColor: '#0D47A1',
+    shadowOpacity: 0.2,
     shadowRadius: 6,
-    elevation: 4
+    elevation: 5
   },
   avatar: {
-    width: 50,
-    height: 50,
-    borderRadius: 25
+    width: 55,
+    height: 55,
+    borderRadius: 27.5
   },
   avatarPlaceholder: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: '#FF69B4',
+    width: 55,
+    height: 55,
+    borderRadius: 27.5,
     justifyContent: 'center',
     alignItems: 'center'
   },
   avatarText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: 'bold'
   },
   textContainer: {
@@ -98,7 +110,7 @@ const styles = StyleSheet.create({
   teacherName: {
     fontSize: 18,
     fontWeight: '700',
-    color: '#FF69B4'
+    color: '#1976D2'
   },
   subjectName: {
     fontSize: 14,
