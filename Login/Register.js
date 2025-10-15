@@ -14,13 +14,14 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const USERS_KEY = 'users';
-const AUTH_KEY = 'userToken';
+// removed AUTH_KEY to avoid auto-login from Register
 
 export default function Register({ onRegistered, onCancel }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [role, setRole] = useState('Student');
   const [loading, setLoading] = useState(false);
 
   const fadeInAnim = useRef(new Animated.Value(0)).current;
@@ -72,11 +73,11 @@ export default function Register({ onRegistered, onCancel }) {
         return;
       }
 
-      users[email] = { name: name.trim(), password };
+      users[email] = { name: name.trim(), password, role };
       await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-      await AsyncStorage.setItem(AUTH_KEY, email);
 
-      if (onRegistered) onRegistered({ email, name: name.trim() });
+      // do NOT auto-set auth token here — return to Login and let Login handle auth
+      if (onRegistered) onRegistered({ email, name: name.trim(), role });
     } catch (err) {
       Alert.alert('Error', 'Unable to register. Try again.');
     } finally {
@@ -107,6 +108,41 @@ export default function Register({ onRegistered, onCancel }) {
         ]}
       >
         <Text style={styles.title}>Create Account</Text>
+
+        <View style={styles.roleRow}>
+          <TouchableOpacity
+            style={[
+              styles.rolePill,
+              role === 'Student' && styles.roleActive,
+            ]}
+            onPress={() => setRole('Student')}
+          >
+            <Text
+              style={[
+                styles.roleText,
+                role === 'Student' && styles.roleTextActive,
+              ]}
+            >
+              Student
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.rolePill,
+              role === 'Instructor' && styles.roleActive,
+            ]}
+            onPress={() => setRole('Instructor')}
+          >
+            <Text
+              style={[
+                styles.roleText,
+                role === 'Instructor' && styles.roleTextActive,
+              ]}
+            >
+              Instructor
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         <TextInput
           value={name}
@@ -146,7 +182,10 @@ export default function Register({ onRegistered, onCancel }) {
           <Text style={styles.buttonText}>Register</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={[styles.button, styles.secondaryButton]} onPress={onCancel}>
+        <TouchableOpacity
+          style={[styles.button, styles.secondaryButton]}
+          onPress={onCancel}
+        >
           <Text style={styles.secondaryText}>Back to Login</Text>
         </TouchableOpacity>
       </Animated.View>
@@ -185,6 +224,28 @@ const styles = StyleSheet.create({
     color: '#FF69B4',
     textAlign: 'center',
     marginBottom: 20,
+  },
+  roleRow: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  rolePill: {
+    padding: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    marginHorizontal: 6,
+  },
+  roleActive: {
+    backgroundColor: '#FF69B4',
+    borderColor: '#FF69B4',
+  },
+  roleText: {
+    color: '#333',
+  },
+  roleTextActive: {
+    color: '#fff',
   },
   input: {
     width: '100%',

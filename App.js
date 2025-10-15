@@ -1,26 +1,19 @@
-import * as React from 'react';
-import { NavigationContainer } from '@react-navigation/native';
-import { createStackNavigator } from '@react-navigation/stack';
-import ChatBox from './PayotChatBox/ChatBox';
-import ChatList from './PayotChatBox/ChatList';
-
-const Stack = createStackNavigator();
+import React from 'react';
+import { SafeAreaView, StyleSheet, Platform, StatusBar } from 'react-native';
+import DeviceFrame from './components/DeviceFrame';
+import Login from './Login/Login';
 
 export default function App() {
-  return (
-    <NavigationContainer>
-      <Stack.Navigator initialRouteName="ChatList">
-        <Stack.Screen 
-          name="ChatList" 
-          component={ChatList} 
-          options={{ title: 'Chat List' }}
-        />
-        <Stack.Screen 
-          name="ChatBox" 
-          component={ChatBox} 
-          options={({ route }) => ({ title: route.params.name })}
-        />
-      </Stack.Navigator>
-    </NavigationContainer>
+  return (    
+    <SafeAreaView style={styles.safe}>
+      <StatusBar barStyle={Platform.OS === 'ios' ? 'dark-content' : 'default'} />
+      <DeviceFrame>
+        <Login />
+      </DeviceFrame>
+    </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: '#EAEAEA' },
+});
