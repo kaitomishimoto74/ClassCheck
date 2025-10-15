@@ -72,7 +72,7 @@ const styles = StyleSheet.create({
  input: {
   flex: 1,
   borderWidth: 1.5,
-  borderColor: '#FF69B4',
+  borderColor: 'blue',
   borderRadius: 20,
   paddingHorizontal: 15,
   paddingVertical: 18, // increased height by 15px
