@@ -8,12 +8,15 @@ import {
   ActivityIndicator,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import ChatScreen from "./ChatScreen";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
 export default function StudentDashboard({ user, onSignOut }) {
   const email = (user && user.email) || "";
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatTarget, setChatTarget] = useState(null); // { classId, ownerEmail }
   const [loading, setLoading] = useState(true);
   const [usersMap, setUsersMap] = useState({});
   const [allClassesMap, setAllClassesMap] = useState({}); // ownerEmail -> [classes]
@@ -113,6 +116,26 @@ export default function StudentDashboard({ user, onSignOut }) {
     setSelectedClass(null);
     setView("list");
   }
+  function openClassChat(cls, ownerEmail) {
+    setChatTarget({ classId: cls.id, ownerEmail });
+    setChatOpen(true);
+  }
+  function closeClassChat() {
+    setChatOpen(false);
+    setChatTarget(null);
+  }
+
+  // if chat is open, render chat as standalone (matches TeacherDashboard behavior)
+  if (chatOpen && chatTarget) {
+    return (
+      <ChatScreen
+        classId={chatTarget.classId}
+        ownerEmail={chatTarget.ownerEmail}
+        currentUser={user}
+        onClose={closeClassChat}
+      />
+    );
+  }
 
   if (loading) {
     return (
@@ -144,6 +167,12 @@ export default function StudentDashboard({ user, onSignOut }) {
           <Text style={{ marginTop: 8, fontWeight: "600" }}>
             Present: {stats.present} · Absent: {stats.absent} · Total classes: {stats.total}
           </Text>
+
+          <View style={{ flexDirection: "row", marginTop: 12 }}>
+            <TouchableOpacity style={[styles.viewButton, { backgroundColor: "#17a2b8" }]} onPress={() => openClassChat(c, selectedClass.ownerEmail)}>
+              <Text style={styles.viewButtonText}>Chat</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <Text style={[styles.subheader, { marginTop: 12 }]}>Attendance Records</Text>
@@ -173,12 +202,11 @@ export default function StudentDashboard({ user, onSignOut }) {
   }
 
   // list view
+  const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || user.email;
   return (
     <View style={styles.container}>
       <View style={styles.headerRow}>
-        <Text style={styles.headerGreeting}>
-          {user && (user.lastName ? `${user.lastName}, ${user.firstName || ""}`.trim() : user.name || user.email)}
-        </Text>
+        <Text style={styles.headerGreeting}>{firstName}</Text>
         <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut && onSignOut()}>
           <Text style={styles.logoutText}>Logout</Text>
         </TouchableOpacity>
@@ -188,28 +216,28 @@ export default function StudentDashboard({ user, onSignOut }) {
       <ScrollView style={{ marginTop: 8 }}>
         {classesForStudent.length === 0 && <Text style={styles.emptyText}>You are not enrolled in any classes</Text>}
         {classesForStudent.map(({ cls, ownerEmail }) => {
-          const stats = computeStats(cls);
-          const teacher = getTeacherDisplay(ownerEmail, cls);
-          return (
-            <View key={cls.id} style={styles.classItem}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.classText}>{cls.meta?.subject || "(no subject)"}</Text>
-                <Text style={styles.metaText}>{teacher}</Text>
-                <Text style={{ marginTop: 6 }}>
-                  Present: {stats.present} · Absent: {stats.absent} · Total: {stats.total}
-                </Text>
-              </View>
-              <View style={{ justifyContent: "center" }}>
-                <TouchableOpacity style={styles.viewButton} onPress={() => openClassDetail(cls, ownerEmail)}>
-                  <Text style={styles.viewButtonText}>View</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        })}
-      </ScrollView>
-    </View>
-  );
+           const stats = computeStats(cls);
+           const teacher = getTeacherDisplay(ownerEmail, cls);
+           return (
+             <View key={cls.id} style={styles.classItem}>
+               <View style={{ flex: 1 }}>
+                 <Text style={styles.classText}>{cls.meta?.subject || "(no subject)"}</Text>
+                 <Text style={styles.metaText}>{teacher}</Text>
+                 <Text style={{ marginTop: 6 }}>
+                   Present: {stats.present} · Absent: {stats.absent} · Total: {stats.total}
+                 </Text>
+               </View>
+               <View style={{ justifyContent: "center" }}>
+                 <TouchableOpacity style={styles.viewButton} onPress={() => openClassDetail(cls, ownerEmail)}>
+                   <Text style={styles.viewButtonText}>View</Text>
+                 </TouchableOpacity>
+               </View>
+             </View>
+           );
+         })}
+       </ScrollView>
+     </View>
+   );
 }
 
 const styles = StyleSheet.create({

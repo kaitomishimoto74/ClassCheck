@@ -11,6 +11,7 @@ import {
   Platform,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import ChatScreen from "./ChatScreen";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -50,6 +51,20 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   // open-class student input
   const [newStudentEmail, setNewStudentEmail] = useState("");
+
+  // add state for chat
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatTarget, setChatTarget] = useState(null); // { classId, ownerEmail }
+
+  // open/close helpers for class chat
+  function openClassChat(classId, ownerEmail) {
+    setChatTarget({ classId, ownerEmail });
+    setChatOpen(true);
+  }
+  function closeClassChat() {
+    setChatOpen(false);
+    setChatTarget(null);
+  }
 
   useEffect(() => {
     // install lightweight global handler to auto sign-out on Metro/dev-server errors
@@ -530,91 +545,88 @@ export default function TeacherDashboard({ user, onSignOut }) {
   }
 
   function renderHome() {
-    const name = (user && (user.name || user.email)) || "Teacher";
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.title}>Hello, {name}</Text>
-        <Text style={styles.subtitle}>Your teaching dashboard</Text>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() => setView("manage")}
-        >
-          <Text style={styles.buttonText}>Manage Classes</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() => onSignOut()}
-        >
-          <Text style={styles.buttonText}>Sign Out</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
+     return (
+       <View style={styles.centered}>
+         <Text style={styles.title}>Hello, {firstName}</Text>
+         <Text style={styles.subtitle}>Your teaching dashboard</Text>
+         <TouchableOpacity
+           style={styles.button}
+           onPress={() => setView("manage")}
+         >
+           <Text style={styles.buttonText}>Manage Classes</Text>
+         </TouchableOpacity>
+         <TouchableOpacity
+           style={styles.button}
+           onPress={() => onSignOut()}
+         >
+           <Text style={styles.buttonText}>Sign Out</Text>
+         </TouchableOpacity>
+       </View>
+     );
+   }
+ 
+   function renderManage() {
+     const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
+     return (
+       <View style={styles.container}>
+         <View style={styles.headerRow}>
+           <Text style={styles.headerGreeting}>Hello, {firstName}</Text>
+           <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut()}>
+             <Text style={styles.logoutText}>Logout</Text>
+           </TouchableOpacity>
+         </View>
+ 
+         <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
+         <TouchableOpacity
+           style={styles.addButton}
+           onPress={() => setView("class")}
+         >
+           <Text style={styles.addButtonText}>+ Add Class</Text>
+         </TouchableOpacity>
+         <ScrollView>
+           {classesList.length === 0 && (
+             <Text style={styles.emptyText}>No classes found</Text>
+           )}
+           {classesList.map((cls) => (
+             <View key={cls.id} style={styles.classItem}>
+               <TouchableOpacity
+                 onPress={() => openClass(cls.id)}
+                 style={{ flex: 1 }}
+               >
+                 <Text style={styles.classText}>{cls.meta.subject}</Text>
+                 <Text style={styles.classText}>
+                   {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
+                 </Text>
+               </TouchableOpacity>
 
-  function renderManage() {
-    const name = (user && (user.name || user.email)) || "Teacher";
-    return (
-      <View style={styles.container}>
-        <View style={styles.headerRow}>
-          <Text style={styles.headerGreeting}>Hello, {name}</Text>
-          <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut()}>
-            <Text style={styles.logoutText}>Logout</Text>
-          </TouchableOpacity>
-        </View>
+               <View style={{ flexDirection: "row", marginTop: 8 }}>
+                 <TouchableOpacity
+                   style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
+                   onPress={() => openClass(cls.id)}
+                 >
+                   <Text style={styles.addButtonText}>Open</Text>
+                 </TouchableOpacity>
 
-        <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => setView("class")}
-        >
-          <Text style={styles.addButtonText}>+ Add Class</Text>
-        </TouchableOpacity>
-        <ScrollView>
-          {classesList.length === 0 && (
-            <Text style={styles.emptyText}>No classes found</Text>
-          )}
-          {classesList.map((cls) => (
-            <View key={cls.id} style={styles.classItem}>
-              <TouchableOpacity
-                onPress={() => openClass(cls.id)}
-                style={{ flex: 1 }}
-              >
-                <Text style={styles.classText}>{cls.meta.subject}</Text>
-                <Text style={styles.classText}>
-                  {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
-                </Text>
-              </TouchableOpacity>
+                 {/* Attendance button removed from Manage list (use Open -> Open Attendance) */}
 
-              <View style={{ flexDirection: "row", marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
-                  onPress={() => openClass(cls.id)}
-                >
-                  <Text style={styles.addButtonText}>Open</Text>
-                </TouchableOpacity>
+                 {/* Chat action moved to inside open class view */}
 
-                <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: "#17a2b8", marginRight: 8 }]}
-                  onPress={() => openAttendance(cls.id)}
-                >
-                  <Text style={styles.addButtonText}>Attendance</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
-                  onPress={() => handleClassDeletePress(cls.id)}
-                >
-                  <Text style={styles.addButtonText}>
-                    {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          ))}
-        </ScrollView>
-      </View>
-    );
-  }
+                 <TouchableOpacity
+                   style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
+                   onPress={() => handleClassDeletePress(cls.id)}
+                 >
+                   <Text style={styles.addButtonText}>
+                     {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
+                   </Text>
+                 </TouchableOpacity>
+               </View>
+             </View>
+           ))}
+         </ScrollView>
+       </View>
+     );
+   }
 
   // helper: return normalized user record (guarantee firstName/lastName)
   function normalizeUserRecord(u = {}, email) {
@@ -721,17 +733,22 @@ export default function TeacherDashboard({ user, onSignOut }) {
         <View style={styles.studentsContainer}>
           <Text style={styles.subheader}>Students</Text>
           {sortedStudents.length === 0 && <Text style={styles.emptyText}>No students enrolled</Text>}
-          {sortedStudents.map((s) => (
-            <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 6 }}>
-              <Text style={styles.studentText}>{s.display}</Text>
-              <TouchableOpacity
-                style={[styles.addButton, { backgroundColor: "#dc3545", paddingVertical: 6, paddingHorizontal: 10 }]}
-                onPress={() => removeStudentFromOpenClass(s.email)}
-              >
-                <Text style={styles.addButtonText}>Remove</Text>
-              </TouchableOpacity>
-            </View>
-          ))}
+          {sortedStudents.length > 0 && (
+            <ScrollView style={{ maxHeight: 5 * 56, marginTop: 6 }}>
+              {sortedStudents.map((s) => (
+                <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 6 }}>
+                  <Text style={styles.studentText}>{s.display}</Text>
+                  <TouchableOpacity
+                    style={[styles.addButton, { backgroundColor: "#dc3545", paddingVertical: 6, paddingHorizontal: 10 }]}
+                    onPress={() => removeStudentFromOpenClass(s.email)}
+                  >
+                    <Text style={styles.addButtonText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+          )}
+
           <TextInput
             style={styles.input}
             placeholder="Enter student email"
@@ -754,6 +771,13 @@ export default function TeacherDashboard({ user, onSignOut }) {
             onPress={() => openAttendanceHistory(cls.id)}
           >
             <Text style={styles.addButtonText}>Attendance History</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#007bff", marginTop: 8 }]}
+            onPress={() => openClassChat(cls.id, user.email)}
+          >
+            <Text style={styles.addButtonText}>Chat</Text>
           </TouchableOpacity>
          </View>
        </View>
@@ -846,6 +870,18 @@ export default function TeacherDashboard({ user, onSignOut }) {
           </TouchableOpacity>
         </View>
       </View>
+    );
+  }
+
+  // if chat open, render it on top
+  if (chatOpen && chatTarget) {
+    return (
+      <ChatScreen
+        classId={chatTarget.classId}
+        ownerEmail={chatTarget.ownerEmail}
+        currentUser={user}
+        onClose={closeClassChat}
+      />
     );
   }
 
