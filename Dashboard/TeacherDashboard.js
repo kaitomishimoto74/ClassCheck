@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -15,17 +15,28 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
-// small safe logger to avoid crashes from bad console calls
-const safeWarn = (...args) => {
-  try {
-    if (console && typeof console.warn === "function") console.warn(...args);
-  } catch (e) {}
-};
+// silence warnings for smoother UX
+const safeWarn = () => {};
+
+// helper: detect dev server / Metro connection errors
+function isDevServerError(err) {
+  if (!err) return false;
+  const s = typeof err === "string" ? err : (err.message || String(err));
+  return /localhost|127\.0\.0\.1|:8081|development server/i.test(s);
+}
 
 export default function TeacherDashboard({ user, onSignOut }) {
   // UI / navigation — default to Manage as main screen
   const [view, setView] = useState("manage"); // home | class | manage | open
+  const [attendanceClassId, setAttendanceClassId] = useState(null);
+  const [attendanceDate, setAttendanceDate] = useState(null); // 'YYYY-MM-DD'
+  const [attendanceState, setAttendanceState] = useState({}); // { email: true/false }
   const [loading, setLoading] = useState(true);
+  // users map to display student names (email -> user object)
+  const [usersMap, setUsersMap] = useState({});
+  // double-press delete state
+  const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const pendingTimerRef = useRef(null);
 
   // class editor fields
   const [subject, setSubject] = useState("");
@@ -41,7 +52,48 @@ export default function TeacherDashboard({ user, onSignOut }) {
   const [newStudentEmail, setNewStudentEmail] = useState("");
 
   useEffect(() => {
-    loadAllClasses();
+    // install lightweight global handler to auto sign-out on Metro/dev-server errors
+    let prevHandler = null;
+    try {
+      if (global.ErrorUtils && typeof global.ErrorUtils.getGlobalHandler === "function") {
+        prevHandler = global.ErrorUtils.getGlobalHandler();
+      } else if (global.ErrorUtils && global.ErrorUtils._globalHandler) {
+        prevHandler = global.ErrorUtils._globalHandler;
+      }
+
+      if (global.ErrorUtils && typeof global.ErrorUtils.setGlobalHandler === "function") {
+        global.ErrorUtils.setGlobalHandler((error, isFatal) => {
+          if (isDevServerError(error)) {
+            safeWarn("Dev server error detected, signing out:", error && (error.message || String(error)));
+            onSignOut && onSignOut();
+            return;
+          }
+          // fallback to previous handler if present so non-dev errors still show
+          if (typeof prevHandler === "function") prevHandler(error, isFatal);
+        });
+      }
+    } catch (e) {
+      safeWarn("install global handler failed", e);
+    }
+
+    // existing mount behaviour
+    if (!user) {
+      onSignOut && onSignOut();
+    } else {
+      setView("manage");
+      loadAllClasses();
+    }
+
+    return () => {
+      // restore previous global handler
+      try {
+        if (global.ErrorUtils && typeof global.ErrorUtils.setGlobalHandler === "function" && prevHandler) {
+          global.ErrorUtils.setGlobalHandler(prevHandler);
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
   }, []);
 
   function normalizeEntry(entry) {
@@ -58,15 +110,23 @@ export default function TeacherDashboard({ user, onSignOut }) {
       const all = raw ? JSON.parse(raw) : {};
       const arr = normalizeEntry(all[user.email]);
       setClassesList(arr);
+      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
+      const users = rawUsers ? JSON.parse(rawUsers) : {};
+      setUsersMap(users);
     } catch (e) {
+      // if dev-server error -> sign out, otherwise silent log
+      if (isDevServerError(e)) {
+        safeWarn("Dev-server error during loadAllClasses, signing out", e);
+        onSignOut && onSignOut();
+        return;
+      }
       safeWarn("loadAllClasses error", e);
-      Alert.alert("Error", "Unable to load classes");
     } finally {
       setLoading(false);
     }
   }
 
-  async function persistClasses(newList = classesList) { // <- safe default -> use current state when omitted
+  async function persistClasses(newList = classesList) {
     try {
       const raw = await AsyncStorage.getItem(CLASSES_KEY);
       const all = raw ? JSON.parse(raw) : {};
@@ -78,8 +138,12 @@ export default function TeacherDashboard({ user, onSignOut }) {
       await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(all));
       setClassesList(newList);
     } catch (e) {
+      if (isDevServerError(e)) {
+        safeWarn("Dev-server error during persistClasses, signing out", e);
+        onSignOut && onSignOut();
+        return;
+      }
       safeWarn("persistClasses error", e);
-      Alert.alert("Error", "Unable to save classes");
     }
   }
 
@@ -125,13 +189,11 @@ export default function TeacherDashboard({ user, onSignOut }) {
   // remove a class the current account manages (no Alert popups)
   async function removeClass(classId) {
     try {
-      safeWarn("removeClass: start", classId);
       const raw = await AsyncStorage.getItem(CLASSES_KEY);
       const all = raw ? JSON.parse(raw) : {};
       const arr = normalizeEntry(all[user.email]);
       const cls = arr.find((c) => c.id === classId);
       if (!cls) {
-        safeWarn("removeClass: not found", classId);
         await loadAllClasses();
         return;
       }
@@ -140,17 +202,11 @@ export default function TeacherDashboard({ user, onSignOut }) {
         "Remove class",
         `Remove "${cls.meta?.subject || "(no subject)"}"? This will delete the class and unenroll its students.`
       );
-      if (!ok) {
-        safeWarn("removeClass: user cancelled", classId);
-        return;
-      }
+      if (!ok) return;
 
-      // remove from instructor list and persist via helper
       const remaining = arr.filter((c) => c.id !== classId);
       await persistClasses(remaining);
-      safeWarn("removeClass: persisted remaining length", remaining.length);
 
-      // unenroll students (support students as strings or { email })
       if (Array.isArray(cls.students) && cls.students.length) {
         const rawUsers = await AsyncStorage.getItem(USERS_KEY);
         const users = rawUsers ? JSON.parse(rawUsers) : {};
@@ -169,51 +225,40 @@ export default function TeacherDashboard({ user, onSignOut }) {
         }
         if (changed) {
           await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-          safeWarn("removeClass: unenrolled students and updated users storage");
-        } else {
-          safeWarn("removeClass: no student user records changed");
         }
-      } else {
-        safeWarn("removeClass: no students to unenroll");
       }
 
-      // refresh UI
       await loadAllClasses();
       if (openClassId === classId) setOpenClassId(null);
       setView("manage");
-      safeWarn("removeClass: finished", classId);
     } catch (e) {
+      if (isDevServerError(e)) {
+        safeWarn("Dev-server error during removeClass, signing out", e);
+        onSignOut && onSignOut();
+        return;
+      }
       safeWarn("removeClass storage read error", e);
     }
   }
 
   // remove student from open class and from user's classes (no Alert popups)
   async function removeStudentFromOpenClass(email) {
-    const cls = currentClass && typeof currentClass === "function" ? currentClass() : null;
-    if (!cls) {
-      safeWarn("removeStudentFromOpenClass: no open class");
-      return;
-    }
+    const cls = classesList.find((c) => c.id === openClassId);
+    if (!cls) return;
 
     const ok = await confirmDialog("Remove student", `Remove ${email} from this class?`);
-    if (!ok) {
-      safeWarn("removeStudentFromOpenClass: cancelled", email);
-      return;
-    }
+    if (!ok) return;
 
     try {
-      // read latest storage
       const raw = await AsyncStorage.getItem(CLASSES_KEY);
       const all = raw ? JSON.parse(raw) : {};
       const arr = normalizeEntry(all[user.email]);
       const target = arr.find((c) => c.id === cls.id);
       if (!target) {
-        safeWarn("removeStudentFromOpenClass: class not found");
         await loadAllClasses();
         return;
       }
 
-      // remove student and persist
       const updatedStudents = (target.students || []).filter((s) => {
         const em = typeof s === "string" ? s : s?.email;
         return em !== email;
@@ -222,7 +267,6 @@ export default function TeacherDashboard({ user, onSignOut }) {
       const updatedArr = arr.map((c) => (c.id === updatedClass.id ? updatedClass : c));
       await persistClasses(updatedArr);
 
-      // update user's record (only if needed)
       const rawUsers = await AsyncStorage.getItem(USERS_KEY);
       const users = rawUsers ? JSON.parse(rawUsers) : {};
       const u = users[email];
@@ -234,10 +278,8 @@ export default function TeacherDashboard({ user, onSignOut }) {
         }
       }
 
-      // clear input and refresh
       setNewStudentEmail("");
       await loadAllClasses();
-      // keep Class view if class still exists
       const exists = updatedArr.find((c) => c.id === cls.id);
       if (!exists) {
         setOpenClassId(null);
@@ -245,9 +287,12 @@ export default function TeacherDashboard({ user, onSignOut }) {
       } else {
         setView("class");
       }
-
-      safeWarn("removeStudentFromOpenClass: finished", email, cls.id);
     } catch (e) {
+      if (isDevServerError(e)) {
+        safeWarn("Dev-server error during removeStudent, signing out", e);
+        onSignOut && onSignOut();
+        return;
+      }
       safeWarn("removeStudentFromOpenClass error", e);
     }
   }
@@ -255,6 +300,30 @@ export default function TeacherDashboard({ user, onSignOut }) {
   function openClass(classId) {
     setOpenClassId(classId);
     setView("class"); // show class view (renderClass handles both create + open)
+  }
+
+  // double-press confirm delete for a class
+  function handleClassDeletePress(classId) {
+    // if same id pressed within timeout => execute delete
+    if (pendingDeleteId === classId) {
+      // clear pending timer and state
+      if (pendingTimerRef.current) {
+        clearTimeout(pendingTimerRef.current);
+        pendingTimerRef.current = null;
+      }
+      setPendingDeleteId(null);
+      removeClass(classId);
+      return;
+    }
+
+    // arm pending delete for this id
+    setPendingDeleteId(classId);
+    // clear previous timer
+    if (pendingTimerRef.current) clearTimeout(pendingTimerRef.current);
+    pendingTimerRef.current = setTimeout(() => {
+      setPendingDeleteId(null);
+      pendingTimerRef.current = null;
+    }, 1500); // 1.5s window for second press
   }
 
   function closeClass() {
@@ -323,17 +392,141 @@ export default function TeacherDashboard({ user, onSignOut }) {
         if (!hasClass) {
           users[email] = { ...u, classes: [...u.classes, classMetaWithId] };
           await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-          safeWarn("handleAddStudent: updated user record for", email);
+          // updated user record
         }
       }
 
       setNewStudentEmail("");
       await loadAllClasses();
-      Alert.alert("Success", "Student added");
+      // success
     } catch (e) {
+      if (isDevServerError(e)) {
+        safeWarn("Dev-server error during addStudent, signing out", e);
+        onSignOut && onSignOut();
+        return;
+      }
       safeWarn("handleAddStudent error", e);
-      Alert.alert("Error", "Unable to add student");
     }
+  }
+
+  function formatDateKey(d = new Date()) {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  
+  // Open attendance view for a class for a given date (default today)
+  function openAttendance(classId, dateKey = null) {
+    const key = dateKey || formatDateKey();
+    setAttendanceDate(key);
+    setAttendanceClassId(classId);
+    // prepare attendance state from classesList
+    const cls = classesList.find((c) => c.id === classId) || { students: [], attendance: {} };
+    const dayRec = (cls.attendance && cls.attendance[key]) || {};
+    const map = {};
+    (cls.students || []).forEach((s) => {
+      const em = typeof s === "string" ? s : s?.email;
+      map[em] = !!dayRec[em];
+    });
+    setAttendanceState(map);
+    setView("attendance");
+  }
+
+  function toggleAttendance(email) {
+    setAttendanceState((prev) => ({ ...prev, [email]: !prev[email] }));
+  }
+
+  async function saveAttendance() {
+    if (!attendanceClassId) return;
+    try {
+      // update classesList in-memory and persist
+      const updated = classesList.map((c) => {
+        if (c.id !== attendanceClassId) return c;
+
+        // update attendance map for the date
+        const att = { ...(c.attendance || {}) };
+        att[attendanceDate] = { ...(att[attendanceDate] || {}) };
+        Object.keys(attendanceState).forEach((em) => {
+          att[attendanceDate][em] = !!attendanceState[em];
+        });
+
+        // build attendance summary for history
+        const present = Object.keys(attendanceState).filter((em) => attendanceState[em]);
+        const absent = Object.keys(attendanceState).filter((em) => !attendanceState[em]);
+
+        // maintain attendanceHistory array (most-recent-first), replace entry if same date exists
+        const history = Array.isArray(c.attendanceHistory) ? [...c.attendanceHistory] : [];
+        const filtered = history.filter((h) => h.date !== attendanceDate);
+        const newEntry = { date: attendanceDate, present, absent };
+        const newHistory = [newEntry, ...filtered].slice(0, 365); // keep at most 1 year of records by default
+
+        return { ...c, attendance: att, attendanceHistory: newHistory };
+      });
+      await persistClasses(updated);
+
+      // reload to refresh usersMap & classesList
+      await loadAllClasses();
+
+      // prepare for next attendance session:
+      //  - default to next day
+      //  - reset attendanceState to all absent (false)
+      const nextDate = formatDateKey(new Date(Date.now() + 24 * 60 * 60 * 1000));
+      const updatedClass = updated.find((c) => c.id === attendanceClassId) || {};
+      const students = Array.isArray(updatedClass.students) ? updatedClass.students : [];
+      const defaultMap = {};
+      students.forEach((s) => {
+        const em = typeof s === "string" ? s : s?.email;
+        if (em) defaultMap[em] = false; // absent by default
+      });
+      setAttendanceClassId(attendanceClassId);
+      setAttendanceDate(nextDate);
+      setAttendanceState(defaultMap);
+      setView("attendance");
+    } catch (e) {
+      safeWarn("saveAttendance error", e);
+    }
+  }
+
+  // open attendance history view for a class
+  function openAttendanceHistory(classId) {
+    setAttendanceClassId(classId);
+    setView("attendanceHistory");
+  }
+  
+  function renderAttendanceHistory() {
+    const cls = classesList.find((c) => c.id === attendanceClassId);
+    if (!cls) return null;
+    const history = Array.isArray(cls.attendanceHistory) ? cls.attendanceHistory : [];
+    return (
+      <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.headerGreeting}>{cls.meta.subject} — Attendance History</Text>
+          <TouchableOpacity style={styles.logoutButton} onPress={() => { setView("class"); setOpenClassId(cls.id); }}>
+            <Text style={styles.logoutText}>Back</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView style={{ marginTop: 12 }}>
+          {history.length === 0 && <Text style={styles.emptyText}>No attendance records</Text>}
+          {history.map((h) => (
+            <View key={h.date} style={{ paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
+              <Text style={{ fontWeight: "600" }}>{h.date}</Text>
+              <Text style={{ color: "#666", marginTop: 4 }}>Present: {Array.isArray(h.present) ? h.present.length : 0}</Text>
+              <Text style={{ color: "#666", marginTop: 2 }}>Absent: {Array.isArray(h.absent) ? h.absent.length : 0}</Text>
+              <View style={{ flexDirection: "row", marginTop: 8 }}>
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: "#17a2b8", marginRight: 8 }]}
+                  onPress={() => openAttendance(cls.id, h.date)}
+                >
+                  <Text style={styles.addButtonText}>View</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      </View>
+    );
   }
 
   function renderHome() {
@@ -401,10 +594,19 @@ export default function TeacherDashboard({ user, onSignOut }) {
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: "#dc3545" }]}
-                  onPress={() => removeClass(cls.id)}
+                  style={[styles.addButton, { backgroundColor: "#17a2b8", marginRight: 8 }]}
+                  onPress={() => openAttendance(cls.id)}
                 >
-                  <Text style={styles.addButtonText}>Delete</Text>
+                  <Text style={styles.addButtonText}>Attendance</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
+                  onPress={() => handleClassDeletePress(cls.id)}
+                >
+                  <Text style={styles.addButtonText}>
+                    {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -412,6 +614,55 @@ export default function TeacherDashboard({ user, onSignOut }) {
         </ScrollView>
       </View>
     );
+  }
+
+  // helper: return normalized user record (guarantee firstName/lastName)
+  function normalizeUserRecord(u = {}, email) {
+    if (!u) return { email, firstName: null, lastName: null, gender: null, name: null };
+    if (u.firstName || u.lastName) return { ...u };
+    if (u.name && typeof u.name === "string") {
+      const parts = u.name.trim().split(/\s+/);
+      const last = parts.length > 1 ? parts.pop() : "";
+      const first = parts.join(" ") || "";
+      return { ...u, firstName: first || null, lastName: last || null };
+    }
+    return { ...u };
+  }
+
+  // display "Last, First" when available, otherwise email
+  function getDisplayNameForEmail(email) {
+    const uRaw = usersMap[email] || null;
+    const u = normalizeUserRecord(uRaw, email);
+    if (u.lastName && u.firstName) return `${u.lastName}, ${u.firstName}`;
+    if (u.lastName) return u.lastName;
+    if (u.firstName) return u.firstName;
+    if (u.name) return u.name;
+    return email;
+  }
+
+  // sort helper for students (by lastName, then firstName, then email)
+  function buildSortedStudentsArray(students = []) {
+    const arr = (students || []).map((s) => {
+      const em = typeof s === "string" ? s : s?.email;
+      const uRaw = usersMap[em] || null;
+      const u = normalizeUserRecord(uRaw, em);
+      return {
+        email: em,
+        firstName: (u.firstName || "").trim(),
+        lastName: (u.lastName || "").trim(),
+        display: getDisplayNameForEmail(em),
+      };
+    });
+    arr.sort((a, b) => {
+      const A = (a.lastName || "").toLowerCase();
+      const B = (b.lastName || "").toLowerCase();
+      if (A !== B) return A < B ? -1 : 1;
+      const Af = (a.firstName || "").toLowerCase();
+      const Bf = (b.firstName || "").toLowerCase();
+      if (Af !== Bf) return Af < Bf ? -1 : 1;
+      return (a.email || "").localeCompare(b.email || "");
+    });
+    return arr;
   }
 
   function renderClass() {
@@ -457,6 +708,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
     }
 
     // Otherwise show class details
+    const sortedStudents = buildSortedStudentsArray(cls.students || []);
     return (
       <View style={styles.container}>
         <Text style={styles.header}>{cls.meta.subject}</Text>
@@ -468,12 +720,18 @@ export default function TeacherDashboard({ user, onSignOut }) {
         </TouchableOpacity>
         <View style={styles.studentsContainer}>
           <Text style={styles.subheader}>Students</Text>
-          <FlatList
-            data={cls.students || []}
-            renderItem={({ item }) => <Text style={styles.studentText}>{item}</Text>}
-            keyExtractor={(item, index) => index.toString()}
-            ListEmptyComponent={<Text style={styles.emptyText}>No students enrolled</Text>}
-          />
+          {sortedStudents.length === 0 && <Text style={styles.emptyText}>No students enrolled</Text>}
+          {sortedStudents.map((s) => (
+            <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 6 }}>
+              <Text style={styles.studentText}>{s.display}</Text>
+              <TouchableOpacity
+                style={[styles.addButton, { backgroundColor: "#dc3545", paddingVertical: 6, paddingHorizontal: 10 }]}
+                onPress={() => removeStudentFromOpenClass(s.email)}
+              >
+                <Text style={styles.addButtonText}>Remove</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
           <TextInput
             style={styles.input}
             placeholder="Enter student email"
@@ -482,6 +740,109 @@ export default function TeacherDashboard({ user, onSignOut }) {
           />
           <TouchableOpacity style={styles.addButton} onPress={handleAddStudent}>
             <Text style={styles.addButtonText}>+ Add Student</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#17a2b8", marginTop: 8 }]}
+            onPress={() => openAttendance(cls.id)}
+          >
+            <Text style={styles.addButtonText}>Open Attendance</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#6f42c1", marginTop: 8 }]}
+            onPress={() => openAttendanceHistory(cls.id)}
+          >
+            <Text style={styles.addButtonText}>Attendance History</Text>
+          </TouchableOpacity>
+         </View>
+       </View>
+     );
+
+   }
+
+  function renderAttendance() {
+    const cls = classesList.find((c) => c.id === attendanceClassId);
+    if (!cls) return null;
+    const sortedStudents = buildSortedStudentsArray(cls.students || []);
+
+    // group by gender (Male first, then Female)
+    const groups = { Male: [], Female: [] };
+    sortedStudents.forEach((s) => {
+      const uRaw = usersMap[s.email] || {};
+      const u = normalizeUserRecord(uRaw, s.email);
+      const g = (u.gender || "").toString().toLowerCase() === "male" ? "Male" : "Female";
+      groups[g].push({ ...s, user: u });
+    });
+
+    return (
+      <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.headerGreeting}>
+            {cls.meta.subject} — Attendance {attendanceDate}
+          </Text>
+          <TouchableOpacity style={styles.logoutButton} onPress={() => setView("class")}>
+            <Text style={styles.logoutText}>Back</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView style={{ marginTop: 12 }}>
+          {groups.Female.length === 0 && groups.Male.length === 0 && (
+            <Text style={styles.emptyText}>No students enrolled</Text>
+          )}
+
+          {["Male", "Female"].map((label) =>
+            groups[label].length > 0 ? (
+              <View key={label} style={{ marginBottom: 12 }}>
+                <Text style={{ fontWeight: "700", marginBottom: 6 }}>{label}</Text>
+                {groups[label].map((s) => {
+                  const em = s.email;
+                  const present = !!attendanceState[em];
+                  return (
+                    <View
+                      key={em}
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        paddingVertical: 8,
+                        borderBottomWidth: 1,
+                        borderBottomColor: "#eee",
+                      }}
+                    >
+                      <Text style={styles.studentText}>{s.display}</Text>
+                      <TouchableOpacity
+                        style={[
+                          styles.addButton,
+                          {
+                            backgroundColor: present ? "#28a745" : "#6c757d",
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                          },
+                        ]}
+                        onPress={() => toggleAttendance(em)}
+                      >
+                        <Text style={styles.addButtonText}>{present ? "Present" : "Absent"}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : null
+          )}
+        </ScrollView>
+
+        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12 }}>
+          <TouchableOpacity
+            style={[styles.addButton, { flex: 1, marginRight: 8 }]}
+            onPress={() => {
+              setAttendanceState({});
+            }}
+          >
+            <Text style={styles.addButtonText}>Clear</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.addButton, { flex: 1 }]} onPress={saveAttendance}>
+            <Text style={styles.addButtonText}>Save Attendance</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -503,6 +864,10 @@ export default function TeacherDashboard({ user, onSignOut }) {
       return renderManage();
     case "class":
       return renderClass();
+    case "attendance":
+      return renderAttendance();
+    case "attendanceHistory":
+      return renderAttendanceHistory();
     default:
       return null;
   }

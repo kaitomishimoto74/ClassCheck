@@ -7,8 +7,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
-  Platform,
+  KeyboardAvoidingView,  Platform,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Register from './Register';
@@ -21,7 +20,6 @@ const USERS_KEY = 'users';
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [selectedRole, setSelectedRole] = useState('Student'); // "Student" | "Instructor"
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState(null);
   const [showRegister, setShowRegister] = useState(false);
@@ -64,15 +62,18 @@ export default function Login() {
         setLoading(false);
         return;
       }
-      // stored role vs selectedRole must match
-      if (account.role && account.role !== selectedRole) {
-        Alert.alert('Authentication failed', `Selected role does not match account role (${account.role}).`);
-        setLoading(false);
-        return;
-      }
 
       await AsyncStorage.setItem(AUTH_KEY, email);
-      setUser({ email, name: account.name, role: account.role });
+      // pass full account object (normalized by Register)
+      setUser({
+        email,
+        name: account.name || `${account.firstName || ''} ${account.lastName || ''}`.trim(),
+        role: account.role || 'Student',
+        firstName: account.firstName || null,
+        lastName: account.lastName || null,
+        gender: account.gender || null,
+        classes: Array.isArray(account.classes) ? account.classes : [],
+      });
     } catch (err) {
       console.warn('signIn error', err);
       Alert.alert('Error', 'Unable to sign in. Try again.');
@@ -86,7 +87,6 @@ export default function Login() {
     setUser(null);
     setEmail('');
     setPassword('');
-    setSelectedRole('Student');
   };
 
   if (loading) {
@@ -99,7 +99,7 @@ export default function Login() {
 
   if (user) {
     // route to role-specific dashboard
-    if (user.role === 'Instructor') {
+    if ((user.role || '').toLowerCase() === 'teacher' || (user.role || '').toLowerCase() === 'instructor') {
       return <TeacherDashboard user={user} onSignOut={signOut} />;
     }
     return <StudentDashboard user={user} onSignOut={signOut} />;
@@ -123,27 +123,35 @@ export default function Login() {
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.card}>
-        <Text style={styles.title}>Login</Text>
+        <Text style={styles.title}>Sign In</Text>
 
-        <View style={styles.roleRow}>
-          <TouchableOpacity style={[styles.rolePill, selectedRole === 'Student' && styles.roleActive]} onPress={() => setSelectedRole('Student')}>
-            <Text style={[styles.roleText, selectedRole === 'Student' && styles.roleTextActive]}>Student</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={[styles.rolePill, selectedRole === 'Instructor' && styles.roleActive]} onPress={() => setSelectedRole('Instructor')}>
-            <Text style={[styles.roleText, selectedRole === 'Instructor' && styles.roleTextActive]}>Instructor</Text>
-          </TouchableOpacity>
-        </View>
-
-        <TextInput value={email} onChangeText={setEmail} placeholder="Email" style={styles.input} keyboardType="email-address" autoCapitalize="none" />
-        <TextInput value={password} onChangeText={setPassword} placeholder="Password" style={styles.input} secureTextEntry />
+        <TextInput
+          value={email}
+          onChangeText={setEmail}
+          placeholder="Email"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          secureTextEntry
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
 
         <TouchableOpacity style={styles.button} onPress={signIn}>
           <Text style={styles.buttonText}>Sign In</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={[styles.button, styles.ghost]} onPress={() => setShowRegister(true)}>
-          <Text style={[styles.buttonText, styles.ghostText]}>Create account</Text>
+        <TouchableOpacity
+          style={[styles.button, styles.secondaryButton]}
+          onPress={() => setShowRegister(true)}
+        >
+          <Text style={styles.secondaryText}>Create account</Text>
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
@@ -151,18 +159,67 @@ export default function Login() {
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFF0F5' },
-  container: { flex: 1, backgroundColor: '#FFF0F5', alignItems: 'center', justifyContent: 'center', padding: 20 },
-  card: { width: '100%', maxWidth: 540, backgroundColor: '#fff', padding: 20, borderRadius: 12, shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 4 },
-  title: { fontSize: 26, marginBottom: 12, fontWeight: '700', textAlign: 'center', color: '#007AFF' },
-  roleRow: { flexDirection: 'row', justifyContent: 'center', marginBottom: 12 },
-  rolePill: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 20, borderWidth: 1, borderColor: '#ccc', marginHorizontal: 6 },
-  roleActive: { backgroundColor: '#007AFF', borderColor: '#007AFF' },
-  roleText: { color: '#333' },
-  roleTextActive: { color: '#fff' },
-  input: { height: 46, borderWidth: 1, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 12, marginBottom: 12 },
-  button: { height: 48, backgroundColor: '#007AFF', borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginTop: 6 },
-  buttonText: { color: '#fff', fontWeight: '600' },
-  ghost: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#007AFF' },
-  ghostText: { color: '#007AFF' },
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFF0F5',
+  },
+  container: {
+    flex: 1,
+    backgroundColor: '#FFF0F5',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  card: {
+    width: '100%',
+    backgroundColor: '#fff',
+    padding: 24,
+    borderRadius: 16,
+    shadowColor: '#FF69B4',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#FF69B4',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  input: {
+    width: '100%',
+    fontSize: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 2,
+    borderColor: '#FF69B4',
+    marginBottom: 20,
+    color: '#333',
+  },
+  button: {
+    backgroundColor: '#FF69B4',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  buttonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  secondaryButton: {
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#FF69B4',
+    marginTop: 10,
+  },
+  secondaryText: {
+    color: '#FF69B4',
+    fontWeight: '600',
+    fontSize: 16,
+  },
 });

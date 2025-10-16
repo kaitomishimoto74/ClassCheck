@@ -14,14 +14,14 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const USERS_KEY = 'users';
-// removed AUTH_KEY to avoid auto-login from Register
 
 export default function Register({ onRegistered, onCancel }) {
-  const [name, setName] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [gender, setGender] = useState('Male'); // only Male / Female
+  const [role, setRole] = useState('Student'); // Student | Teacher
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [role, setRole] = useState('Student');
   const [loading, setLoading] = useState(false);
 
   const fadeInAnim = useRef(new Animated.Value(0)).current;
@@ -42,23 +42,21 @@ export default function Register({ onRegistered, onCancel }) {
     ]).start();
   }, []);
 
-  const validateEmail = (e) => /\S+@\S+\.\S+/.test(e);
+  function validateEmail(e) {
+    return /\S+@\S+\.\S+/.test(e);
+  }
 
-  const register = async () => {
-    if (!name.trim() || !email.trim() || !password) {
-      Alert.alert('Validation', 'Please fill name, email and password.');
+  async function handleRegister() {
+    const f = (firstName || '').trim();
+    const l = (lastName || '').trim();
+    const em = (email || '').trim().toLowerCase();
+    const pw = (password || '').trim();
+    if (!f || !l || !em || !pw) {
+      Alert.alert('Validation', 'All fields are required');
       return;
     }
-    if (!validateEmail(email)) {
-      Alert.alert('Validation', 'Please enter a valid email address.');
-      return;
-    }
-    if (password.length < 6) {
-      Alert.alert('Validation', 'Password must be at least 6 characters.');
-      return;
-    }
-    if (password !== confirm) {
-      Alert.alert('Validation', 'Passwords do not match.');
+    if (!validateEmail(em)) {
+      Alert.alert('Validation', 'Enter a valid email');
       return;
     }
 
@@ -67,23 +65,34 @@ export default function Register({ onRegistered, onCancel }) {
       const raw = await AsyncStorage.getItem(USERS_KEY);
       const users = raw ? JSON.parse(raw) : {};
 
-      if (users[email]) {
-        Alert.alert('Registration', 'An account with that email already exists.');
+      if (users[em]) {
+        Alert.alert('Conflict', 'Email already registered');
         setLoading(false);
         return;
       }
 
-      users[email] = { name: name.trim(), password, role };
-      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+      // store normalized user record with selected role
+      users[em] = {
+        email: em,
+        password: pw,
+        role: role, // selected role
+        firstName: f,
+        lastName: l,
+        gender: gender, // only 'Male' or 'Female'
+        // classes array will be added later when enrolled
+        classes: [],
+      };
 
-      // do NOT auto-set auth token here — return to Login and let Login handle auth
-      if (onRegistered) onRegistered({ email, name: name.trim(), role });
-    } catch (err) {
-      Alert.alert('Error', 'Unable to register. Try again.');
-    } finally {
+      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
       setLoading(false);
+      Alert.alert('Registered', 'Account created');
+
+      onRegistered && onRegistered(users[em]);
+    } catch (e) {
+      setLoading(false);
+      Alert.alert('Error', 'Unable to register');
     }
-  };
+  }
 
   if (loading) {
     return (
@@ -109,49 +118,67 @@ export default function Register({ onRegistered, onCancel }) {
       >
         <Text style={styles.title}>Create Account</Text>
 
-        <View style={styles.roleRow}>
-          <TouchableOpacity
-            style={[
-              styles.rolePill,
-              role === 'Student' && styles.roleActive,
-            ]}
-            onPress={() => setRole('Student')}
-          >
-            <Text
-              style={[
-                styles.roleText,
-                role === 'Student' && styles.roleTextActive,
-              ]}
-            >
-              Student
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.rolePill,
-              role === 'Instructor' && styles.roleActive,
-            ]}
-            onPress={() => setRole('Instructor')}
-          >
-            <Text
-              style={[
-                styles.roleText,
-                role === 'Instructor' && styles.roleTextActive,
-              ]}
-            >
-              Instructor
-            </Text>
-          </TouchableOpacity>
-        </View>
-
         <TextInput
-          value={name}
-          onChangeText={setName}
-          placeholder="Full Name"
+          value={firstName}
+          onChangeText={setFirstName}
+          placeholder="First Name"
           style={styles.input}
           autoCapitalize="words"
           placeholderTextColor="#999"
         />
+        <TextInput
+          value={lastName}
+          onChangeText={setLastName}
+          placeholder="Last Name"
+          style={styles.input}
+          autoCapitalize="words"
+          placeholderTextColor="#999"
+        />
+
+        <Text style={{ marginBottom: 6, fontWeight: '600' }}>Role</Text>
+        <View style={styles.row}>
+          <TouchableOpacity
+            style={[
+              styles.roleButton,
+              role === 'Student' && styles.roleSelected,
+            ]}
+            onPress={() => setRole('Student')}
+          >
+            <Text style={styles.roleText}>Student</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.roleButton,
+              role === 'Teacher' && styles.roleSelected,
+            ]}
+            onPress={() => setRole('Teacher')}
+          >
+            <Text style={styles.roleText}>Teacher</Text>
+          </TouchableOpacity>
+        </View>
+
+        <Text style={{ marginBottom: 6, fontWeight: '600' }}>Gender</Text>
+        <View style={styles.row}>
+          <TouchableOpacity
+            style={[
+              styles.genderButton,
+              gender === 'Male' && styles.genderSelected,
+            ]}
+            onPress={() => setGender('Male')}
+          >
+            <Text style={styles.genderText}>Male</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.genderButton,
+              gender === 'Female' && styles.genderSelected,
+            ]}
+            onPress={() => setGender('Female')}
+          >
+            <Text style={styles.genderText}>Female</Text>
+          </TouchableOpacity>
+        </View>
+
         <TextInput
           value={email}
           onChangeText={setEmail}
@@ -169,17 +196,11 @@ export default function Register({ onRegistered, onCancel }) {
           style={styles.input}
           placeholderTextColor="#999"
         />
-        <TextInput
-          value={confirm}
-          onChangeText={setConfirm}
-          placeholder="Confirm Password"
-          secureTextEntry
-          style={styles.input}
-          placeholderTextColor="#999"
-        />
 
-        <TouchableOpacity style={styles.button} onPress={register}>
-          <Text style={styles.buttonText}>Register</Text>
+        <TouchableOpacity style={styles.button} onPress={handleRegister}>
+          <Text style={styles.buttonText}>
+            {loading ? 'Saving...' : 'Register'}
+          </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -225,27 +246,36 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 20,
   },
-  roleRow: {
+  row: {
     flexDirection: 'row',
     marginBottom: 12,
   },
-  rolePill: {
-    padding: 8,
+  genderButton: {
+    paddingVertical: 8,
     paddingHorizontal: 12,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#ccc',
-    marginHorizontal: 6,
+    borderRadius: 6,
+    backgroundColor: '#eee',
+    marginRight: 8,
   },
-  roleActive: {
-    backgroundColor: '#FF69B4',
-    borderColor: '#FF69B4',
+  genderSelected: {
+    backgroundColor: '#007bff',
+  },
+  genderText: {
+    color: '#000',
+  },
+  roleButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: '#eee',
+    marginRight: 8,
+  },
+  roleSelected: {
+    backgroundColor: '#28a745',
   },
   roleText: {
-    color: '#333',
-  },
-  roleTextActive: {
-    color: '#fff',
+    color: '#000',
+    fontWeight: '600',
   },
   input: {
     width: '100%',
