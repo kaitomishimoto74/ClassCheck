@@ -8,420 +8,616 @@ import {
   TextInput,
   Alert,
   FlatList,
+  Platform,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
+// small safe logger to avoid crashes from bad console calls
+const safeWarn = (...args) => {
+  try {
+    if (console && typeof console.warn === "function") console.warn(...args);
+  } catch (e) {}
+};
+
 export default function TeacherDashboard({ user, onSignOut }) {
-  // editable class fields
+  // UI / navigation — default to Manage as main screen
+  const [view, setView] = useState("manage"); // home | class | manage | open
+  const [loading, setLoading] = useState(true);
+
+  // class editor fields
   const [subject, setSubject] = useState("");
   const [department, setDepartment] = useState("");
   const [yearLevel, setYearLevel] = useState("");
   const [block, setBlock] = useState("");
 
-  // class / students state
-  const [students, setStudents] = useState([]); // array of { email, name? }
-  const [loading, setLoading] = useState(true);
+  // classes and open class
+  const [classesList, setClassesList] = useState([]); // array of { id, meta, students, attendance }
+  const [openClassId, setOpenClassId] = useState(null);
 
-  // attendance state for selected date (default today)
-  const todayKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const [attendance, setAttendance] = useState({}); // { email: true|false }
-  const [view, setView] = useState("class"); // 'class' | 'manage' | 'attendance'
-
-  // add-student state (inside attendance)
+  // open-class student input
   const [newStudentEmail, setNewStudentEmail] = useState("");
 
-  // load saved classes for this instructor
   useEffect(() => {
-    loadClassData();
+    loadAllClasses();
   }, []);
 
-  async function loadClassData() {
+  function normalizeEntry(entry) {
+    if (!entry) return [];
+    if (Array.isArray(entry)) return entry;
+    if (typeof entry === "object") return [entry];
+    return [];
+  }
+
+  async function loadAllClasses() {
     setLoading(true);
     try {
       const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const classes = raw ? JSON.parse(raw) : {};
-      const cls = classes[user.email] || { students: [], attendance: {}, meta: {} };
-      setStudents(cls.students || []);
-      const todays = (cls.attendance && cls.attendance[todayKey]) || {};
-      setAttendance(todays);
-
-      // load editable meta if present
-      const meta = cls.meta || {};
-      setSubject(meta.subject || "");
-      setDepartment(meta.department || "");
-      setYearLevel(meta.yearLevel || "");
-      setBlock(meta.block || "");
+      const all = raw ? JSON.parse(raw) : {};
+      const arr = normalizeEntry(all[user.email]);
+      setClassesList(arr);
     } catch (e) {
-      console.warn("loadClassData error", e);
-      Alert.alert("Error", "Unable to load class data");
+      safeWarn("loadAllClasses error", e);
+      Alert.alert("Error", "Unable to load classes");
     } finally {
       setLoading(false);
     }
   }
 
-  async function saveClass(studentsList, attendanceObj) {
+  async function persistClasses(newList = classesList) { // <- safe default -> use current state when omitted
     try {
       const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const classes = raw ? JSON.parse(raw) : {};
-      classes[user.email] = {
-        students: studentsList,
-        attendance: (classes[user.email] && classes[user.email].attendance) || {},
-        meta: { subject, department, yearLevel, block },
-      };
-      if (attendanceObj) classes[user.email].attendance[todayKey] = attendanceObj;
-      await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(classes));
+      const all = raw ? JSON.parse(raw) : {};
+      if (!newList || newList.length === 0) {
+        delete all[user.email];
+      } else {
+        all[user.email] = newList;
+      }
+      await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(all));
+      setClassesList(newList);
     } catch (e) {
-      console.warn("saveClass error", e);
-      Alert.alert("Error", "Unable to save class data");
+      safeWarn("persistClasses error", e);
+      Alert.alert("Error", "Unable to save classes");
     }
   }
 
+  // Create a new class and save to Manage
   async function handleSaveClass() {
-    await saveClass(students, attendance);
-    Alert.alert("Saved", "Class info saved");
+    const meta = {
+      subject: subject.trim(),
+      department: department.trim(),
+      yearLevel: yearLevel.trim(),
+      block: block.trim(),
+    };
+    if (!meta.subject) {
+      Alert.alert("Validation", "Subject is required");
+      return;
+    }
+    const newClass = {
+      id: Date.now().toString(),
+      meta,
+      students: [],
+      attendance: {},
+    };
+    const updated = [...classesList, newClass];
+    await persistClasses(updated);
+    // reset inputs
+    setSubject("");
+    setDepartment("");
+    setYearLevel("");
+    setBlock("");
+    setView("manage");
+    Alert.alert("Saved", "Class saved");
   }
 
-  // remove entire class (with confirmation). also remove enrollment from students.
-  async function removeClass() {
-    Alert.alert(
-      "Remove class",
-      "This will remove the saved class and unenroll students from this class. Continue?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const rawClasses = await AsyncStorage.getItem(CLASSES_KEY);
-              const classes = rawClasses ? JSON.parse(rawClasses) : {};
-              const cls = classes[user.email];
-              // remove class entry
-              delete classes[user.email];
-              await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(classes));
-
-              // remove class reference from each student's user record
-              if (cls && cls.students && cls.students.length) {
-                const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-                const users = rawUsers ? JSON.parse(rawUsers) : {};
-                const meta = cls.meta || { subject, department, yearLevel, block };
-                for (const s of cls.students) {
-                  const em = s.email;
-                  const u = users[em];
-                  if (u) {
-                    const arr = Array.isArray(u.classes) ? u.classes : [];
-                    users[em] = { ...u, classes: arr.filter((c) => !(c.instructor === user.email && c.subject === meta.subject && c.department === meta.department && c.yearLevel === meta.yearLevel && c.block === meta.block)) };
-                  }
-                }
-                await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-              }
-
-              // reset local state
-              setStudents([]);
-              setAttendance({});
-              setSubject("");
-              setDepartment("");
-              setYearLevel("");
-              setBlock("");
-              Alert.alert("Removed", "Class removed");
-            } catch (e) {
-              console.warn("removeClass error", e);
-              Alert.alert("Error", "Unable to remove class");
-            }
-          },
-        },
-      ]
-    );
+  // cross-platform confirmation: window.confirm on web, skip modal on native (no Alert)
+  async function confirmDialog(title, message) {
+    if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
+      return window.confirm(`${title}\n\n${message}`);
+    }
+    // no modal on native by request — proceed and log
+    safeWarn("confirmDialog: skipping native confirmation:", title, message);
+    return true;
   }
 
-  function confirmRemoveStudent(email) {
-    Alert.alert("Remove student", `Remove ${email} from this class?`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Remove", style: "destructive", onPress: () => removeStudent(email) },
-    ]);
-  }
-
-  async function removeStudent(email) {
-    const updated = students.filter((s) => s.email !== email);
-    const newAttendance = { ...attendance };
-    delete newAttendance[email];
-    setStudents(updated);
-    setAttendance(newAttendance);
-    await saveClass(updated, newAttendance);
-
-    // remove class reference from the user's record
+  // remove a class the current account manages (no Alert popups)
+  async function removeClass(classId) {
     try {
+      safeWarn("removeClass: start", classId);
+      const raw = await AsyncStorage.getItem(CLASSES_KEY);
+      const all = raw ? JSON.parse(raw) : {};
+      const arr = normalizeEntry(all[user.email]);
+      const cls = arr.find((c) => c.id === classId);
+      if (!cls) {
+        safeWarn("removeClass: not found", classId);
+        await loadAllClasses();
+        return;
+      }
+
+      const ok = await confirmDialog(
+        "Remove class",
+        `Remove "${cls.meta?.subject || "(no subject)"}"? This will delete the class and unenroll its students.`
+      );
+      if (!ok) {
+        safeWarn("removeClass: user cancelled", classId);
+        return;
+      }
+
+      // remove from instructor list and persist via helper
+      const remaining = arr.filter((c) => c.id !== classId);
+      await persistClasses(remaining);
+      safeWarn("removeClass: persisted remaining length", remaining.length);
+
+      // unenroll students (support students as strings or { email })
+      if (Array.isArray(cls.students) && cls.students.length) {
+        const rawUsers = await AsyncStorage.getItem(USERS_KEY);
+        const users = rawUsers ? JSON.parse(rawUsers) : {};
+        let changed = false;
+        for (const s of cls.students) {
+          const em = typeof s === "string" ? s : s?.email;
+          if (!em) continue;
+          const u = users[em];
+          if (u && Array.isArray(u.classes)) {
+            const filtered = u.classes.filter((cc) => cc.id !== classId);
+            if (filtered.length !== u.classes.length) {
+              users[em] = { ...u, classes: filtered };
+              changed = true;
+            }
+          }
+        }
+        if (changed) {
+          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+          safeWarn("removeClass: unenrolled students and updated users storage");
+        } else {
+          safeWarn("removeClass: no student user records changed");
+        }
+      } else {
+        safeWarn("removeClass: no students to unenroll");
+      }
+
+      // refresh UI
+      await loadAllClasses();
+      if (openClassId === classId) setOpenClassId(null);
+      setView("manage");
+      safeWarn("removeClass: finished", classId);
+    } catch (e) {
+      safeWarn("removeClass storage read error", e);
+    }
+  }
+
+  // remove student from open class and from user's classes (no Alert popups)
+  async function removeStudentFromOpenClass(email) {
+    const cls = currentClass && typeof currentClass === "function" ? currentClass() : null;
+    if (!cls) {
+      safeWarn("removeStudentFromOpenClass: no open class");
+      return;
+    }
+
+    const ok = await confirmDialog("Remove student", `Remove ${email} from this class?`);
+    if (!ok) {
+      safeWarn("removeStudentFromOpenClass: cancelled", email);
+      return;
+    }
+
+    try {
+      // read latest storage
+      const raw = await AsyncStorage.getItem(CLASSES_KEY);
+      const all = raw ? JSON.parse(raw) : {};
+      const arr = normalizeEntry(all[user.email]);
+      const target = arr.find((c) => c.id === cls.id);
+      if (!target) {
+        safeWarn("removeStudentFromOpenClass: class not found");
+        await loadAllClasses();
+        return;
+      }
+
+      // remove student and persist
+      const updatedStudents = (target.students || []).filter((s) => {
+        const em = typeof s === "string" ? s : s?.email;
+        return em !== email;
+      });
+      const updatedClass = { ...target, students: updatedStudents };
+      const updatedArr = arr.map((c) => (c.id === updatedClass.id ? updatedClass : c));
+      await persistClasses(updatedArr);
+
+      // update user's record (only if needed)
       const rawUsers = await AsyncStorage.getItem(USERS_KEY);
       const users = rawUsers ? JSON.parse(rawUsers) : {};
       const u = users[email];
       if (u && Array.isArray(u.classes)) {
-        users[email] = { ...u, classes: u.classes.filter((c) => !(c.instructor === user.email && c.subject === subject && c.department === department && c.yearLevel === yearLevel && c.block === block)) };
-        await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+        const filtered = u.classes.filter((c) => c.id !== cls.id);
+        if (filtered.length !== u.classes.length) {
+          users[email] = { ...u, classes: filtered };
+          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+        }
       }
+
+      // clear input and refresh
+      setNewStudentEmail("");
+      await loadAllClasses();
+      // keep Class view if class still exists
+      const exists = updatedArr.find((c) => c.id === cls.id);
+      if (!exists) {
+        setOpenClassId(null);
+        setView("manage");
+      } else {
+        setView("class");
+      }
+
+      safeWarn("removeStudentFromOpenClass: finished", email, cls.id);
     } catch (e) {
-      console.warn("removeStudent user update error", e);
+      safeWarn("removeStudentFromOpenClass error", e);
     }
   }
 
-  function toggleAttendance(email) {
-    const newA = { ...attendance, [email]: !attendance[email] };
-    setAttendance(newA);
+  function openClass(classId) {
+    setOpenClassId(classId);
+    setView("class"); // show class view (renderClass handles both create + open)
   }
 
-  async function handleSaveAttendance() {
-    await saveClass(students, attendance);
-    Alert.alert("Saved", "Attendance saved for today");
+  function closeClass() {
+    setOpenClassId(null);
+    setView("manage");
   }
 
-  // add student to class and enroll in user's record
-  async function addStudentToClass() {
+  // implement adding student properly (persist into class.students as string)
+  async function handleAddStudent() {
     const email = (newStudentEmail || "").trim().toLowerCase();
     if (!email) {
-      Alert.alert("Validation", "Enter student email");
-      return;
-    }
-    if (students.some((s) => s.email === email)) {
-      Alert.alert("Duplicate", "Student already in class");
-      setNewStudentEmail("");
+      Alert.alert("Validation", "Email is required");
       return;
     }
 
+    // validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      Alert.alert("Validation", "Enter a valid student email");
+      return;
+    }
+    
     try {
-      // update class students list
-      const updated = [...students, { email, name: null }];
-      setStudents(updated);
-      await saveClass(updated, attendance);
+      // read latest classes
+      const raw = await AsyncStorage.getItem(CLASSES_KEY);
+      const all = raw ? JSON.parse(raw) : {};
+      const arr = normalizeEntry(all[user.email]);
+      const idx = arr.findIndex((c) => c.id === openClassId);
+      if (idx === -1) {
+        Alert.alert("Error", "Open class not found");
+        await loadAllClasses();
+        return;
+      }
 
-      // update user record so student sees the class
+      // ensure student is registered
+      const rawUsersCheck = await AsyncStorage.getItem(USERS_KEY);
+      const usersCheck = rawUsersCheck ? JSON.parse(rawUsersCheck) : {};
+      const registered = usersCheck[email];
+      if (!registered || (registered.role && registered.role.toLowerCase() !== "student")) {
+        Alert.alert("Not registered", "Student email not found or not registered as a student");
+        return;
+      }
+
+      const cls = arr[idx] || { id: openClassId, meta: {}, students: [], attendance: {} };
+      // avoid duplicates
+      const exists = (cls.students || []).some((s) => (typeof s === "string" ? s === email : s?.email === email));
+      if (exists) {
+        Alert.alert("Duplicate", "Student already in class");
+        setNewStudentEmail("");
+        return;
+      }
+
+      // append as string (matches renderClass)
+      const updatedStudents = [...(cls.students || []), email];
+      const updatedClass = { ...cls, students: updatedStudents };
+      const updatedArr = arr.map((c) => (c.id === updatedClass.id ? updatedClass : c));
+      await persistClasses(updatedArr);
+
+      // update registered student's user record with this class reference (only if needed)
       const rawUsers = await AsyncStorage.getItem(USERS_KEY);
       const users = rawUsers ? JSON.parse(rawUsers) : {};
-      const u = users[email] || { name: null, password: null, role: "Student", classes: [] };
-      const classMeta = { instructor: user.email, subject, department, yearLevel, block };
-      const existing = Array.isArray(u.classes) ? u.classes.find((c) => c.instructor === user.email && c.subject === subject && c.department === department && c.yearLevel === yearLevel && c.block === block) : null;
-      if (!existing) {
-        const arr = Array.isArray(u.classes) ? [...u.classes, classMeta] : [classMeta];
-        users[email] = { ...u, classes: arr, role: u.role || "Student" };
-        await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+      const u = users[email];
+      if (u && Array.isArray(u.classes)) {
+        const classMetaWithId = { id: updatedClass.id, instructor: user.email, ...updatedClass.meta };
+        const hasClass = u.classes.find((c) => c.id === updatedClass.id);
+        if (!hasClass) {
+          users[email] = { ...u, classes: [...u.classes, classMetaWithId] };
+          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+          safeWarn("handleAddStudent: updated user record for", email);
+        }
       }
 
       setNewStudentEmail("");
-      Alert.alert("Added", `${email} added to class`);
+      await loadAllClasses();
+      Alert.alert("Success", "Student added");
     } catch (e) {
-      console.warn("addStudentToClass error", e);
+      safeWarn("handleAddStudent error", e);
       Alert.alert("Error", "Unable to add student");
     }
   }
 
-  // render student row (remove still allowed)
-  function renderStudent({ item }) {
+  function renderHome() {
+    const name = (user && (user.name || user.email)) || "Teacher";
     return (
-      <View style={styles.studentRow}>
-        <Text style={styles.studentText}>{item.name ? `${item.name} — ` : ""}{item.email}</Text>
-        <View style={{ flexDirection: "row", alignItems: "center" }}>
-          {view === "attendance" ? (
-            <TouchableOpacity
-              style={[styles.attBtn, attendance[item.email] ? styles.present : styles.absent]}
-              onPress={() => toggleAttendance(item.email)}
-            >
-              <Text style={styles.attText}>{attendance[item.email] ? "Present" : "Absent"}</Text>
-            </TouchableOpacity>
-          ) : null}
-          <TouchableOpacity style={styles.removeBtn} onPress={() => confirmRemoveStudent(item.email)}>
-            <Text style={styles.removeText}>Remove</Text>
-          </TouchableOpacity>
-        </View>
+      <View style={styles.centered}>
+        <Text style={styles.title}>Hello, {name}</Text>
+        <Text style={styles.subtitle}>Your teaching dashboard</Text>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => setView("manage")}
+        >
+          <Text style={styles.buttonText}>Manage Classes</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => onSignOut()}
+        >
+          <Text style={styles.buttonText}>Sign Out</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
-  const totalCount = students.length;
-
-  // Saved class card for Manage view
-  function SavedClassCard() {
-    const metaLabel = `${subject || "(no subject)"} • ${department || "(no department)"} • ${yearLevel || "(no year)"} • ${block || "(no block)"}`;
+  function renderManage() {
+    const name = (user && (user.name || user.email)) || "Teacher";
     return (
-      <View style={styles.savedCard}>
-        <Text style={styles.savedTitle}>{metaLabel}</Text>
-        <Text style={styles.savedSub}>{totalCount} students</Text>
-        <View style={{ flexDirection: "row", marginTop: 12 }}>
-          <TouchableOpacity style={[styles.loadBtn, { flex: 1, marginRight: 8 }]} onPress={() => { setView("class"); }}>
-            <Text style={styles.loadBtnText}>Open Class</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.loadBtn, { flex: 1 }]} onPress={() => { /* ensure saved then open attendance */ handleSaveClass().then(() => setView("attendance")); }}>
-            <Text style={styles.loadBtnText}>Mark Attendance</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
-  return (
-    <ScrollView style={styles.container}>
-      <View style={styles.headerRow}>
-        <Text style={styles.header}>👋 Welcome, {user?.name ?? user?.email}!</Text>
-        <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.removeClassBtn} onPress={removeClass}>
-            <Text style={styles.removeClassText}>Remove Class</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.logoutTop} onPress={onSignOut}>
+      <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.headerGreeting}>Hello, {name}</Text>
+          <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut()}>
             <Text style={styles.logoutText}>Logout</Text>
           </TouchableOpacity>
         </View>
-      </View>
 
-      <View style={styles.modeRow}>
+        <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
         <TouchableOpacity
-          style={[styles.modeBtn, view === "class" && styles.modeActive]}
+          style={styles.addButton}
           onPress={() => setView("class")}
         >
-          <Text style={[styles.modeText, view === "class" && styles.modeTextActive]}>Class</Text>
+          <Text style={styles.addButtonText}>+ Add Class</Text>
         </TouchableOpacity>
+        <ScrollView>
+          {classesList.length === 0 && (
+            <Text style={styles.emptyText}>No classes found</Text>
+          )}
+          {classesList.map((cls) => (
+            <View key={cls.id} style={styles.classItem}>
+              <TouchableOpacity
+                onPress={() => openClass(cls.id)}
+                style={{ flex: 1 }}
+              >
+                <Text style={styles.classText}>{cls.meta.subject}</Text>
+                <Text style={styles.classText}>
+                  {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
+                </Text>
+              </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.modeBtn, view === "manage" && styles.modeActive]}
-          onPress={() => setView("manage")}
-        >
-          <Text style={[styles.modeText, view === "manage" && styles.modeTextActive]}>Manage Classes</Text>
-        </TouchableOpacity>
+              <View style={{ flexDirection: "row", marginTop: 8 }}>
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
+                  onPress={() => openClass(cls.id)}
+                >
+                  <Text style={styles.addButtonText}>Open</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: "#dc3545" }]}
+                  onPress={() => removeClass(cls.id)}
+                >
+                  <Text style={styles.addButtonText}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </ScrollView>
       </View>
+    );
+  }
 
-      {view === "manage" ? (
-        <View style={styles.selector}>
-          <Text style={styles.sectionTitle}>Saved Class</Text>
-          <SavedClassCard />
-          <Text style={styles.note}>Saved classes are listed here. Use "Mark Attendance" to add students and take attendance.</Text>
-        </View>
-      ) : view === "class" ? (
-        <View style={styles.selector}>
-          <Text style={styles.sectionTitle}>🏫 Class Info</Text>
+  function renderClass() {
+    const cls = classesList.find((c) => c.id === openClassId);
 
-          <Text style={styles.label}>Subject Name</Text>
+    // If there is no openClassId -> show the "Create Class" form
+    if (!cls) {
+      return (
+        <View style={styles.container}>
+          <Text style={styles.header}>Create Class</Text>
           <TextInput
+            style={styles.input}
+            placeholder="Subject"
             value={subject}
             onChangeText={setSubject}
-            placeholder="e.g., IT Elective 1"
-            style={styles.textInput}
           />
-
-          <Text style={styles.label}>Department</Text>
           <TextInput
+            style={styles.input}
+            placeholder="Department"
             value={department}
             onChangeText={setDepartment}
-            placeholder="e.g., BSIT"
-            style={styles.textInput}
           />
-
-          <Text style={styles.label}>Year / Course</Text>
           <TextInput
+            style={styles.input}
+            placeholder="Year Level"
             value={yearLevel}
             onChangeText={setYearLevel}
-            placeholder="e.g., 3rd Year"
-            style={styles.textInput}
           />
-
-          <Text style={styles.label}>Block / Section</Text>
           <TextInput
+            style={styles.input}
+            placeholder="Block"
             value={block}
             onChangeText={setBlock}
-            placeholder="Block 2"
-            style={styles.textInput}
           />
-
-          <View style={{ flexDirection: "row", marginTop: 12 }}>
-            <TouchableOpacity style={[styles.loadBtn, { flex: 1 }]} onPress={handleSaveClass}>
-              <Text style={styles.loadBtnText}>Save Class</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={{ marginTop: 16 }}>
-            <Text style={styles.sectionTitle}>Students</Text>
-            <Text style={styles.note}>
-              Students are managed in Mark Attendance. Use Manage Classes → Mark Attendance to add students and take attendance.
-            </Text>
-          </View>
+          <TouchableOpacity style={styles.addButton} onPress={handleSaveClass}>
+            <Text style={styles.addButtonText}>Save Class</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.closeButton} onPress={() => setView("manage")}>
+            <Text style={styles.closeButtonText}>Cancel</Text>
+          </TouchableOpacity>
         </View>
-      ) : (
-        <View style={styles.selector}>
-          <Text style={styles.sectionTitle}>📅 Mark Attendance — {todayKey}</Text>
-          <Text style={styles.note}>Add students and mark attendance here.</Text>
+      );
+    }
 
-          <View style={{ marginTop: 12 }}>
-            <View style={styles.addRow}>
-              <TextInput
-                placeholder="student@example.com"
-                value={newStudentEmail}
-                onChangeText={setNewStudentEmail}
-                style={styles.input}
-                autoCapitalize="none"
-                keyboardType="email-address"
-              />
-              <TouchableOpacity style={styles.addBtn} onPress={addStudentToClass}>
-                <Text style={styles.addBtnText}>Add</Text>
-              </TouchableOpacity>
-            </View>
-
-            <FlatList
-              data={students}
-              keyExtractor={(i) => i.email}
-              renderItem={renderStudent}
-              ListEmptyComponent={<Text style={styles.note}>No students yet — add students above.</Text>}
-            />
-            <TouchableOpacity style={styles.saveBtn} onPress={handleSaveAttendance}>
-              <Text style={styles.saveBtnText}>Save Attendance</Text>
-            </TouchableOpacity>
-          </View>
+    // Otherwise show class details
+    return (
+      <View style={styles.container}>
+        <Text style={styles.header}>{cls.meta.subject}</Text>
+        <Text style={styles.metaText}>
+          {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
+        </Text>
+        <TouchableOpacity style={styles.closeButton} onPress={closeClass}>
+          <Text style={styles.closeButtonText}>Close</Text>
+        </TouchableOpacity>
+        <View style={styles.studentsContainer}>
+          <Text style={styles.subheader}>Students</Text>
+          <FlatList
+            data={cls.students || []}
+            renderItem={({ item }) => <Text style={styles.studentText}>{item}</Text>}
+            keyExtractor={(item, index) => index.toString()}
+            ListEmptyComponent={<Text style={styles.emptyText}>No students enrolled</Text>}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Enter student email"
+            value={newStudentEmail}
+            onChangeText={setNewStudentEmail}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={handleAddStudent}>
+            <Text style={styles.addButtonText}>+ Add Student</Text>
+          </TouchableOpacity>
         </View>
-      )}
+      </View>
+    );
+  }
 
-      <Text style={styles.footer}>© 2025 ClassCheck</Text>
-    </ScrollView>
-  );
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <Text>Loading...</Text>
+      </View>
+    );
+  }
+
+  switch (view) {
+    case "home":
+      return renderHome();
+    case "manage":
+      return renderManage();
+    case "class":
+      return renderClass();
+    default:
+      return null;
+  }
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f8faff", padding: 16 },
-  headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
-  header: { fontSize: 20, fontWeight: "700", color: "#1a1a2e" },
-  headerRight: { flexDirection: "row", alignItems: "center" },
-  removeClassBtn: { marginRight: 12, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: "#fff", borderWidth: 1, borderColor: "#f44336" },
-  removeClassText: { color: "#f44336", fontWeight: "600" },
-  logoutTop: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: "#d9534f" },
-  logoutText: { color: "#fff", fontWeight: "600" },
-
-  modeRow: { flexDirection: "row", marginBottom: 12 },
-  modeBtn: { padding: 10, borderRadius: 8, borderWidth: 1, borderColor: "#ccc", marginRight: 8 },
-  modeActive: { backgroundColor: "#4a6cf7", borderColor: "#4a6cf7" },
-  modeText: { color: "#333" },
-  modeTextActive: { color: "#fff" },
-  selector: { backgroundColor: "#fff", padding: 16, borderRadius: 12, marginBottom: 20, elevation: 2 },
-  sectionTitle: { fontSize: 18, fontWeight: "600", marginBottom: 10 },
-  label: { marginTop: 10, fontSize: 14, color: "#333" },
-  textInput: { height: 44, borderWidth: 1, borderColor: "#ddd", borderRadius: 8, paddingHorizontal: 10, marginTop: 6, marginBottom: 8 },
-  loadBtn: { backgroundColor: "#4a6cf7", padding: 10, borderRadius: 8, marginTop: 15, alignItems: "center" },
-  loadBtnText: { color: "#fff", fontWeight: "600" },
-  savedCard: { backgroundColor: "#f7fbff", padding: 14, borderRadius: 12, marginBottom: 12 },
-  savedTitle: { fontSize: 16, fontWeight: "700" },
-  savedSub: { color: "#666", marginTop: 6 },
-  note: { marginTop: 10, color: "#666" },
-  studentRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderColor: "#f0f0f0" },
-  studentText: { color: "#222" },
-  removeBtn: { marginLeft: 12, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: "#fff", borderRadius: 8, borderWidth: 1, borderColor: "#f44336" },
-  removeText: { color: "#f44336" },
-  attBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, marginRight: 8 },
-  present: { backgroundColor: "#28a745" },
-  absent: { backgroundColor: "#ccc" },
-  attText: { color: "#fff", fontWeight: "600" },
-  saveBtn: { backgroundColor: "#28a745", padding: 12, borderRadius: 8, marginTop: 16, alignItems: "center" },
-  saveBtnText: { color: "#fff", fontWeight: "700" },
-
-  // attendance add row
-  addRow: { flexDirection: "row", alignItems: "center", marginTop: 8 },
-  input: { flex: 1, height: 44, borderWidth: 1, borderColor: "#ddd", borderRadius: 8, paddingHorizontal: 10, marginRight: 8 },
-  addBtn: { backgroundColor: "#4a6cf7", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
-  addBtnText: { color: "#fff", fontWeight: "600" },
-
-  footer: { textAlign: "center", color: "#999", marginVertical: 20 },
+  centered: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  headerGreeting: {
+    fontSize: 18,
+    fontWeight: "600",
+  },
+  logoutButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: "#dc3545",
+    borderRadius: 6,
+  },
+  logoutText: {
+    color: "#fff",
+    fontSize: 14,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: "bold",
+  },
+  subtitle: {
+    fontSize: 16,
+    color: "#666",
+  },
+  button: {
+    marginTop: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    backgroundColor: "#007bff",
+    borderRadius: 5,
+  },
+  buttonText: {
+    color: "#fff",
+    fontSize: 16,
+  },
+  container: {
+    flex: 1,
+    padding: 20,
+    backgroundColor: "#fff",
+  },
+  header: {
+    fontSize: 22,
+    fontWeight: "bold",
+  },
+  subheader: {
+    fontSize: 18,
+    fontWeight: "600",
+    marginTop: 10,
+  },
+  metaText: {
+    fontSize: 14,
+    color: "#666",
+  },
+  classItem: {
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: "#ddd",
+  },
+  classText: {
+    fontSize: 16,
+  },
+  emptyText: {
+    textAlign: "center",
+    color: "#999",
+    marginTop: 20,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 5,
+    padding: 10,
+    marginTop: 10,
+  },
+  addButton: {
+    marginTop: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    backgroundColor: "#28a745",
+    borderRadius: 5,
+    alignItems: "center",
+  },
+  addButtonText: {
+    color: "#fff",
+    fontSize: 16,
+  },
+  closeButton: {
+    marginTop: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    backgroundColor: "#dc3545",
+    borderRadius: 5,
+    alignItems: "center",
+  },
+  closeButtonText: {
+    color: "#fff",
+    fontSize: 16,
+  },
+  studentsContainer: {
+    marginTop: 20,
+  },
+  studentText: {
+    fontSize: 16,
+  },
 });
