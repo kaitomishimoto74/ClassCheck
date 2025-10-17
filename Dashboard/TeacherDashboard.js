@@ -56,6 +56,9 @@ export default function TeacherDashboard({ user, onSignOut }) {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatTarget, setChatTarget] = useState(null); // { classId, ownerEmail }
 
+  // add state for bottom tab (Home | Manage | Profile)
+  const [selectedTab, setSelectedTab] = useState("home");
+
   // open/close helpers for class chat
   function openClassChat(classId, ownerEmail) {
     setChatTarget({ classId, ownerEmail });
@@ -546,25 +549,82 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   function renderHome() {
     const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
-     return (
-       <View style={styles.centered}>
-         <Text style={styles.title}>Hello, {firstName}</Text>
-         <Text style={styles.subtitle}>Your teaching dashboard</Text>
-         <TouchableOpacity
-           style={styles.button}
-           onPress={() => setView("manage")}
-         >
-           <Text style={styles.buttonText}>Manage Classes</Text>
-         </TouchableOpacity>
-         <TouchableOpacity
-           style={styles.button}
-           onPress={() => onSignOut()}
-         >
-           <Text style={styles.buttonText}>Sign Out</Text>
-         </TouchableOpacity>
-       </View>
-     );
-   }
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.title}>Hello, {firstName}</Text>
+        <Text style={styles.subtitle}>Your teaching dashboard</Text>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => setView("manage")}
+        >
+          <Text style={styles.buttonText}>Manage Classes</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => onSignOut()}
+        >
+          <Text style={styles.buttonText}>Sign Out</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // alias for compatibility with newer UI code that calls renderHomeView
+  function renderHomeView() {
+    return renderHome();
+  }
+
+  // Profile view: account info + signout
+  function renderProfileView() {
+    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || user.email;
+    const lastName = (user && (user.lastName || "")) || "";
+    return (
+      <View style={{ flex: 1, padding: 18, backgroundColor: "#fff" }}>
+        <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 8 }}>Account</Text>
+        <View style={{ backgroundColor: "#f8f9fa", padding: 12, borderRadius: 10 }}>
+          <Text style={{ fontWeight: "700", fontSize: 16 }}>{firstName} {lastName}</Text>
+          <Text style={{ color: "#666", marginTop: 6 }}>{user && user.email}</Text>
+          <Text style={{ color: "#666", marginTop: 6 }}>{user && (user.role || "Teacher")}</Text>
+
+          <TouchableOpacity style={[styles.addButton, { marginTop: 12, backgroundColor: "#dc3545" }]} onPress={() => onSignOut && onSignOut()}>
+            <Text style={styles.addButtonText}>Sign Out</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // bottom nav UI (mobile-friendly)
+  function renderBottomNav() {
+    const itemStyle = (active) => ({
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 8,
+      backgroundColor: active ? "#eef6ff" : "#fff",
+    });
+    const iconStyle = (active) => ({ fontSize: 18, color: active ? "#007bff" : "#666" });
+    const labelStyle = (active) => ({ fontSize: 12, color: active ? "#007bff" : "#666", marginTop: 4 });
+
+    return (
+      <View style={{ height: 64, flexDirection: "row", borderTopWidth: 1, borderTopColor: "#eee", backgroundColor: "#fff" }}>
+        <TouchableOpacity style={itemStyle(selectedTab === "home")} onPress={() => setSelectedTab("home")}>
+          <Text style={iconStyle(selectedTab === "home")}>🏠</Text>
+          <Text style={labelStyle(selectedTab === "home")}>Home</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={itemStyle(selectedTab === "manage")} onPress={() => setSelectedTab("manage")}>
+          <Text style={iconStyle(selectedTab === "manage")}>📚</Text>
+          <Text style={labelStyle(selectedTab === "manage")}>Manage</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={itemStyle(selectedTab === "profile")} onPress={() => setSelectedTab("profile")}>
+          <Text style={iconStyle(selectedTab === "profile")}>👤</Text>
+          <Text style={labelStyle(selectedTab === "profile")}>Profile</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
  
    function renderManage() {
      const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
@@ -576,7 +636,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
              <Text style={styles.logoutText}>Logout</Text>
            </TouchableOpacity>
          </View>
- 
+  
          <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
          <TouchableOpacity
            style={styles.addButton}
@@ -590,42 +650,42 @@ export default function TeacherDashboard({ user, onSignOut }) {
            )}
            {classesList.map((cls) => (
              <View key={cls.id} style={styles.classItem}>
-               <TouchableOpacity
-                 onPress={() => openClass(cls.id)}
-                 style={{ flex: 1 }}
-               >
-                 <Text style={styles.classText}>{cls.meta.subject}</Text>
-                 <Text style={styles.classText}>
-                   {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
-                 </Text>
-               </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => openClass(cls.id)}
+                  style={{ flex: 1 }}
+                >
+                  <Text style={styles.classText}>{cls.meta.subject}</Text>
+                  <Text style={styles.classText}>
+                    {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
+                  </Text>
+                </TouchableOpacity>
 
-               <View style={{ flexDirection: "row", marginTop: 8 }}>
-                 <TouchableOpacity
-                   style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
-                   onPress={() => openClass(cls.id)}
-                 >
-                   <Text style={styles.addButtonText}>Open</Text>
-                 </TouchableOpacity>
+                <View style={{ flexDirection: "row", marginTop: 8 }}>
+                  <TouchableOpacity
+                    style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
+                    onPress={() => openClass(cls.id)}
+                  >
+                    <Text style={styles.addButtonText}>Open</Text>
+                  </TouchableOpacity>
 
-                 {/* Attendance button removed from Manage list (use Open -> Open Attendance) */}
+                  {/* Attendance button removed from Manage list (use Open -> Open Attendance) */}
 
-                 {/* Chat action moved to inside open class view */}
+                  {/* Chat action moved to inside open class view */}
 
-                 <TouchableOpacity
-                   style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
-                   onPress={() => handleClassDeletePress(cls.id)}
-                 >
-                   <Text style={styles.addButtonText}>
-                     {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
-                   </Text>
-                 </TouchableOpacity>
-               </View>
-             </View>
-           ))}
-         </ScrollView>
-       </View>
-     );
+                  <TouchableOpacity
+                    style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
+                    onPress={() => handleClassDeletePress(cls.id)}
+                  >
+                    <Text style={styles.addButtonText}>
+                      {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      );
    }
 
   // helper: return normalized user record (guarantee firstName/lastName)
@@ -893,20 +953,31 @@ export default function TeacherDashboard({ user, onSignOut }) {
     );
   }
 
-  switch (view) {
-    case "home":
-      return renderHome();
-    case "manage":
-      return renderManage();
-    case "class":
-      return renderClass();
-    case "attendance":
-      return renderAttendance();
-    case "attendanceHistory":
-      return renderAttendanceHistory();
-    default:
-      return null;
+  // Show detailed screens (class / attendance / history) as before
+  if (view === "class" || view === "attendance" || view === "attendanceHistory") {
+    switch (view) {
+      case "class":
+        return renderClass();
+      case "attendance":
+        return renderAttendance();
+      case "attendanceHistory":
+        return renderAttendanceHistory();
+      default:
+        return null;
+    }
   }
+
+  // For top-level dashboard, render selectedTab and bottom navigation.
+  // Keep existing routing/functions unchanged; Manage tab reuses renderManage()
+  return (
+    <View style={{ flex: 1 }}>
+      {selectedTab === "home" && renderHomeView()}
+      {selectedTab === "manage" && renderManage()}
+      {selectedTab === "profile" && renderProfileView()}
+
+      {renderBottomNav()}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
