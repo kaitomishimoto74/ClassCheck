@@ -594,7 +594,19 @@ export default function TeacherDashboard({ user, onSignOut }) {
     );
   }
 
-  // bottom nav UI (mobile-friendly)
+  // bottom nav UI (mobile-friendly) — ensure nav always takes effect by clearing overlays / views
+  function handleNavPress(tab) {
+    // switch selected tab
+    setSelectedTab(tab);
+    // move to top-level manage view so mainContent will render selectedTab
+    setView("manage");
+    // close any open chat overlay so nav is responsive
+    setChatOpen(false);
+    setChatTarget(null);
+    // clear open class detail so we return to top-level
+    setOpenClassId(null);
+  }
+
   function renderBottomNav() {
     const itemStyle = (active) => ({
       flex: 1,
@@ -608,17 +620,17 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
     return (
       <View style={{ height: 64, flexDirection: "row", borderTopWidth: 1, borderTopColor: "#eee", backgroundColor: "#fff" }}>
-        <TouchableOpacity style={itemStyle(selectedTab === "home")} onPress={() => setSelectedTab("home")}>
+        <TouchableOpacity style={itemStyle(selectedTab === "home")} onPress={() => handleNavPress("home")}>
           <Text style={iconStyle(selectedTab === "home")}>🏠</Text>
           <Text style={labelStyle(selectedTab === "home")}>Home</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={itemStyle(selectedTab === "manage")} onPress={() => setSelectedTab("manage")}>
+        <TouchableOpacity style={itemStyle(selectedTab === "manage")} onPress={() => handleNavPress("manage")}>
           <Text style={iconStyle(selectedTab === "manage")}>📚</Text>
           <Text style={labelStyle(selectedTab === "manage")}>Manage</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={itemStyle(selectedTab === "profile")} onPress={() => setSelectedTab("profile")}>
+        <TouchableOpacity style={itemStyle(selectedTab === "profile")} onPress={() => handleNavPress("profile")}>
           <Text style={iconStyle(selectedTab === "profile")}>👤</Text>
           <Text style={labelStyle(selectedTab === "profile")}>Profile</Text>
         </TouchableOpacity>
@@ -933,48 +945,53 @@ export default function TeacherDashboard({ user, onSignOut }) {
     );
   }
 
-  // if chat open, render it on top
-  if (chatOpen && chatTarget) {
-    return (
-      <ChatScreen
-        classId={chatTarget.classId}
-        ownerEmail={chatTarget.ownerEmail}
-        currentUser={user}
-        onClose={closeClassChat}
-      />
-    );
-  }
+  // compute main content based on state but keep bottom nav always visible
+  let mainContent = null;
 
   if (loading) {
-    return (
+    mainContent = (
       <View style={styles.centered}>
         <Text>Loading...</Text>
       </View>
     );
-  }
-
-  // Show detailed screens (class / attendance / history) as before
-  if (view === "class" || view === "attendance" || view === "attendanceHistory") {
-    switch (view) {
-      case "class":
-        return renderClass();
-      case "attendance":
-        return renderAttendance();
-      case "attendanceHistory":
-        return renderAttendanceHistory();
-      default:
-        return null;
+  } else if (view === "class") {
+    mainContent = renderClass();
+  } else if (view === "attendance") {
+    mainContent = renderAttendance();
+  } else if (view === "attendanceHistory") {
+    mainContent = renderAttendanceHistory();
+  } else {
+    // top-level tabs: home / manage / profile
+    if (selectedTab === "home") {
+      // renderHomeView exists (alias to renderHome)
+      mainContent = typeof renderHomeView === "function" ? renderHomeView() : renderHome();
+    } else if (selectedTab === "manage") {
+      mainContent = renderManage();
+    } else if (selectedTab === "profile") {
+      mainContent = renderProfileView();
+    } else {
+      mainContent = renderManage();
     }
   }
 
-  // For top-level dashboard, render selectedTab and bottom navigation.
-  // Keep existing routing/functions unchanged; Manage tab reuses renderManage()
   return (
     <View style={{ flex: 1 }}>
-      {selectedTab === "home" && renderHomeView()}
-      {selectedTab === "manage" && renderManage()}
-      {selectedTab === "profile" && renderProfileView()}
+      {mainContent}
 
+      {/* Chat overlay: rendered above content but above the bottom nav.
+          Keep nav permanent by constraining chat to area above nav (nav height ~=64). */}
+      {chatOpen && chatTarget ? (
+        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 64 }}>
+          <ChatScreen
+            classId={chatTarget.classId}
+            ownerEmail={chatTarget.ownerEmail}
+            currentUser={user}
+            onClose={closeClassChat}
+          />
+        </View>
+      ) : null}
+
+      {/* permanent bottom navigation */}
       {renderBottomNav()}
     </View>
   );
