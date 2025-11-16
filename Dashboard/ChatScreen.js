@@ -12,6 +12,7 @@ import {
   Alert,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as DocumentPicker from "expo-document-picker";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -169,22 +170,19 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
       Alert.alert("No recipient", "Select a person to send the attachment to.");
       return;
     }
-    let DocumentPicker;
-    try {
-      // dynamic require so app won't crash if package not present
-      // install with: npm install react-native-document-picker
-      DocumentPicker = require("react-native-document-picker");
-    } catch (err) {
-      Alert.alert("Attachment unavailable", "Install react-native-document-picker to attach files.");
-      return;
-    }
 
     try {
-      const res = await DocumentPicker.pickSingle({
-        type: [DocumentPicker.types.images, DocumentPicker.types.pdf, DocumentPicker.types.plainText, DocumentPicker.types.allFiles],
+      // expo-document-picker works on Expo-managed apps and supports web/android/ios.
+      const res = await DocumentPicker.getDocumentAsync({
+        type: Platform.OS === "web" ? ["image/*", "application/pdf", "*/*"] : "*/*",
+        copyToCacheDirectory: false,
       });
-      if (!res) return;
-      const attachment = { name: res.name || "file", uri: res.uri, type: res.type || res.mimeType || "application/octet-stream" };
+      if (!res || res.type === "cancel") return;
+      const attachment = {
+        name: res.name || "file",
+        uri: res.uri,
+        type: res.mimeType || "application/octet-stream",
+      };
       const msg = {
         id: genId(),
         senderEmail: currentUser.email,
@@ -196,10 +194,8 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
       };
       await persistMessage(msg);
     } catch (err) {
-      if (DocumentPicker.isCancel && DocumentPicker.isCancel(err)) {
-        return;
-      }
       console.warn("attach error", err);
+      Alert.alert("Attachment error", "Could not attach file.");
     }
   }
 
