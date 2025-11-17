@@ -198,53 +198,52 @@ export default function ChatScreen(props) {
         return;
       }
 
-      // Mobile file handling
-      const res = await DocumentPicker.getDocumentAsync({
-        type: "*/*",
-        copyToCacheDirectory: false,
-      });
-      
-      if (!res || res.type === "cancel") return;
-      
-      // Get file size using FileSystem
-      let fileSize = 0;
+      // Mobile file handling - FIX HERE
       try {
-        const fileInfo = await FileSystem.getInfoAsync(res.uri);
-        fileSize = fileInfo.size || 0;
-      } catch (e) {
-        console.warn("Could not get file size", e);
-        fileSize = 0;
+        const res = await DocumentPicker.getDocumentAsync({
+          type: "*/*",
+          copyToCacheDirectory: true,
+        });
+
+        if (!res.assets || res.assets.length === 0) {
+          Alert.alert("Cancelled", "No file selected");
+          return;
+        }
+
+        const file = res.assets[0];
+        const fileName = file.name || `file_${Date.now()}`;
+
+        // Get file size
+        let fileSize = file.size || 0;
+
+        const attachment = {
+          name: fileName,
+          uri: file.uri,
+          size: fileSize,
+          type: file.mimeType || "application/octet-stream",
+        };
+
+        const msg = {
+          id: genId(),
+          senderEmail: currentUser.email,
+          senderName: getSenderName(currentUser.email),
+          recipientEmail: recipient || null,
+          text: `📎 Shared file: ${fileName}`,
+          date: new Date().toISOString(),
+          attachment,
+        };
+
+        await persistMessage(msg);
+        Alert.alert("Success", "File attached!");
+      } catch (docError) {
+        if (docError.message === "User cancelled") {
+          return; // User cancelled, don't show error
+        }
+        Alert.alert("File Error", docError.message || "Could not pick file");
       }
-
-      // Copy file to persistent cache directory for mobile
-      const cacheDir = `${FileSystem.cacheDirectory}ClassCheckAttachments/`;
-      await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true }).catch(() => {});
-      
-      const fileName = res.name || `file_${Date.now()}`;
-      const newUri = `${cacheDir}${fileName}`;
-      await FileSystem.copyAsync({ from: res.uri, to: newUri });
-
-      const attachment = {
-        name: res.name || "file",
-        uri: newUri,
-        size: fileSize,
-        type: res.mimeType || "application/octet-stream",
-      };
-      
-      const msg = {
-        id: genId(),
-        senderEmail: currentUser.email,
-        senderName: getSenderName(currentUser.email),
-        recipientEmail: recipient || null,
-        text: `📎 Shared file: ${res.name || "file"}`,
-        date: new Date().toISOString(),
-        attachment,
-      };
-      
-      await persistMessage(msg);
     } catch (err) {
       console.warn("attach error", err);
-      Alert.alert("Attachment error", "Could not attach file.");
+      Alert.alert("Attachment error", err.message || "Could not attach file.");
     }
   }
 
