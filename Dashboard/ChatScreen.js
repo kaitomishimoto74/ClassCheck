@@ -32,7 +32,8 @@ function convoKey(a, b) {
 // - ownerEmail (instructor account that owns the class)
 // - currentUser { email, firstName, lastName, name }
 // - onClose()
-export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }) {
+export default function ChatScreen(props) {
+  const { classId, ownerEmail, currentUser, onClose } = props;
   const [usersMap, setUsersMap] = useState({});
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
@@ -196,24 +197,55 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
     }
   }
 
+  // ensure we load latest users (so profileImage persists and is available in chat)
+  async function reloadUsersMap() {
+    try {
+      const raw = await AsyncStorage.getItem(USERS_KEY);
+      const u = raw ? JSON.parse(raw) : {};
+      setUsersMap(u);
+    } catch (e) {
+      // ignore, keep previous usersMap
+      if (__DEV__) console.warn("reloadUsersMap error", e);
+    }
+  }
+
+  useEffect(() => {
+    // load users once on mount so sender profile images are available
+    reloadUsersMap();
+  }, []);
+
+  // If you already have a function that persists messages (persistMessage/sendMessage),
+  // call reloadUsersMap() after saving a message so the UI picks up any recent profile changes.
+  // Example patch you can apply where you persist messages:
+  //
+  // await persistMessage(msg);
+  // reloadUsersMap();
+  //
+  // (I did not modify unknown send function here to avoid breaking behaviour;
+  //  if you want I can patch the exact send function once you paste it.)
+
   function renderItem({ item }) {
     const mine = item.senderEmail === currentUser.email;
     const toLabel = item.recipientEmail ? `(to ${displayNameForEmail(item.recipientEmail)})` : "";
     const senderUser = usersMap[item.senderEmail] || {};
     const senderProfileImage = senderUser.profileImage || null;
+
+    // robust body detection (handles different saved keys)
+    const body = (item.text || item.message || item.body || item.content || "").toString();
+
     const initials = (() => {
       const fn = (senderUser.firstName || "").trim();
       const ln = (senderUser.lastName || "").trim();
       if (fn || ln) return (fn.charAt(0) || "") + (ln.charAt(0) || "");
-      if (senderUser.name) return senderUser.name.split(/\s+/).map(p=>p.charAt(0)).slice(0,2).join("");
-      return (item.senderName && item.senderName.charAt(0)) || item.senderEmail.charAt(0) || "?";
+      if (senderUser.name) return senderUser.name.split(/\s+/).map(p => p.charAt(0)).slice(0, 2).join("");
+      return (item.senderName && item.senderName.charAt(0)) || (item.senderEmail && item.senderEmail.charAt(0)) || "?";
     })();
 
     return (
       <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg]}>
-        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
           {/* Profile Picture or initials */}
-          <View style={{ flexShrink: 0 }}>
+          <View style={{ flexShrink: 0, marginRight: 8 }}>
             {senderProfileImage ? (
               <Image
                 source={{ uri: senderProfileImage }}
@@ -231,12 +263,16 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
             <Text style={styles.msgSender}>
               {item.senderName} {item.recipientEmail ? <Text style={{ fontSize: 12, color: "#666" }}>{toLabel}</Text> : null}
             </Text>
-            {item.text ? <Text style={styles.msgText}>{item.text}</Text> : null}
+
+            {/* show body if present */}
+            {body && body.trim().length > 0 ? <Text style={styles.msgText}>{body}</Text> : null}
+
             {item.attachment ? (
               <TouchableOpacity style={{ marginTop: 6 }} onPress={() => { Alert.alert(item.attachment.name || "Attachment", item.attachment.uri || ""); }}>
                 <Text style={{ color: "#007bff" }}>{item.attachment.name || "attachment"}</Text>
               </TouchableOpacity>
             ) : null}
+
             <Text style={styles.msgDate}>{new Date(item.date).toLocaleString()}</Text>
           </View>
         </View>
