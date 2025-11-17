@@ -1,35 +1,23 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
-  StyleSheet,
   ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  Image,
   TextInput,
   Alert,
-  FlatList,
-  Platform,
-  Image,
   Modal,
+  Platform,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Camera, useCameraPermissions } from "expo-camera";
 import ChatScreen from "./ChatScreen";
-import * as ImagePicker from "expo-image-picker";
-import * as ImageManipulator from "expo-image-manipulator";
-import { BarCodeScanner } from "expo-barcode-scanner";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
-
-// silence warnings for smoother UX
-const safeWarn = () => {};
-
-// helper: detect dev server / Metro connection errors
-function isDevServerError(err) {
-  if (!err) return false;
-  const s = typeof err === "string" ? err : (err.message || String(err));
-  return /localhost|127\.0\.0\.1|:8081|development server/i.test(s);
-}
 
 export default function TeacherDashboard({ user, onSignOut }) {
   // UI / navigation — default to Manage as main screen
@@ -74,7 +62,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   // Add state for QR scanner at the top with other states
   const [scannerVisible, setScannerVisible] = useState(false);
-  const [hasScannerPermission, setHasScannerPermission] = useState(null);
+  const [permission, requestPermission] = useCameraPermissions();
 
   // open/close helpers for class chat
   function openClassChat(classId, ownerEmail) {
@@ -1024,54 +1012,63 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   async function requestScannerPermission() {
     try {
-      const { status } = await BarCodeScanner.requestPermissionsAsync();
-      const granted = status === "granted";
-      setHasScannerPermission(granted);
-      if (!granted) Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
-      return granted;
-    } catch (e) {
-      console.warn("requestScannerPermission", e);
-      Alert.alert("Permission error", "Could not request camera permission.");
-      return false;
-    }
-  }
+      if (!permission) {
+        const { granted } = await requestPermission();
+        if (!granted) {
+          Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
+          return false;
+        }
+        return true;
+      }
+      
+      if (!permission.granted) {
+        Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
+        return false;
+      }
+      return true;
+     } catch (e) {
+       console.warn("requestScannerPermission", e);
+       Alert.alert("Permission error", "Could not request camera permission.");
+       return false;
+     }
+   }
 
-  async function openQrScanner() {
-    const ok = await requestScannerPermission();
-    if (!ok) return;
-    setScannerVisible(true);
-  }
+   async function openQrScanner() {
+     const ok = await requestScannerPermission();
+     if (!ok) return;
+     setScannerVisible(true);
+   }
 
-  function handleBarCodeScanned({ data }) {
-    // data contains the scanned QR code (student email)
-    const studentEmail = (data || "").trim().toLowerCase();
-    
-    // check if this email exists in current attendance class
-    const cls = classesList.find((c) => c.id === attendanceClassId);
-    if (!cls) {
-      Alert.alert("Error", "Class not found");
-      setScannerVisible(false);
-      return;
-    }
+   function handleBarCodeScanned({ data }) {
+     // data contains the scanned QR code (student email)
+     const studentEmail = (data || "").trim().toLowerCase();
+     
+     // check if this email exists in current attendance class
+     const cls = classesList.find((c) => c.id === attendanceClassId);
+     if (!cls) {
+       Alert.alert("Error", "Class not found");
+       setScannerVisible(false);
+       return;
+     }
 
-    // check if student is enrolled
-    const isEnrolled = (cls.students || []).some((s) => {
-      const em = typeof s === "string" ? s : s?.email;
-      return em === studentEmail;
-    });
+     // check if student is enrolled
+     const isEnrolled = (cls.students || []).some((s) => {
+       const em = typeof s === "string" ? s : s?.email;
+       return em === studentEmail;
+     });
 
-    if (!isEnrolled) {
-      Alert.alert("Not enrolled", `${studentEmail} is not in this class`);
-      setScannerVisible(false);
-      return;
-    }
+     if (!isEnrolled) {
+       Alert.alert("Not enrolled", `${studentEmail} is not in this class`);
+       setScannerVisible(false);
+       return;
+     }
 
-    // mark as present automatically
-    setAttendanceState((prev) => ({ ...prev, [studentEmail]: true }));
+     // mark as present automatically
+     setAttendanceState((prev) => ({ ...prev, [studentEmail]: true }));
 
-    Alert.alert("Success", `${studentEmail} marked present`);
-    setScannerVisible(false);
-  }
+     Alert.alert("Success", `${studentEmail} marked present`);
+     setScannerVisible(false);
+   }
 
   function renderAttendance() {
     const cls = classesList.find((c) => c.id === attendanceClassId);
@@ -1170,16 +1167,26 @@ export default function TeacherDashboard({ user, onSignOut }) {
           </TouchableOpacity>
         </View>
 
-        {/* QR Scanner modal */}
+        {/* QR Scanner Modal with Camera */}
         <Modal visible={scannerVisible} transparent={false} onRequestClose={() => setScannerVisible(false)}>
           <View style={{ flex: 1 }}>
-            <BarCodeScanner
-              onBarCodeScanned={handleBarCodeScanned}
+            <Camera
               style={{ flex: 1 }}
+              onBarcodeScanned={handleBarCodeScanned}
+              barCodeScannerSettings={{
+                barCodeTypes: ["qr"],
+              }}
             />
-            <TouchableOpacity
+             <TouchableOpacity
               onPress={() => setScannerVisible(false)}
-              style={{ position: "absolute", top: 40, right: 20, padding: 10, backgroundColor: "#fff", borderRadius: 6 }}
+              style={{
+                position: "absolute",
+                top: 40,
+                right: 20,
+                padding: 10,
+                backgroundColor: "#fff",
+                borderRadius: 6,
+              }}
             >
               <Text style={{ color: "#007bff", fontWeight: "700" }}>Close</Text>
             </TouchableOpacity>

@@ -10,7 +10,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Image,
-  ScrollView,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Register from './Register';
@@ -125,47 +124,45 @@ export default function Login() {
 
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-        <View style={styles.card}>
-          {/* App Icon */}
-          <Image
-            source={require('../assets/icon_1.png')}
-            style={styles.icon}
-            resizeMode="contain"
-          />
+      <View style={styles.card}>
+        {/* App Icon */}
+        <Image
+          source={require('../assets/icon_1.png')}
+          style={styles.icon}
+          resizeMode="contain"
+        />
 
-          <Text style={styles.title}>ClassCheck</Text>
+        <Text style={styles.title}>ClassCheck</Text>
 
-          <TextInput
-            value={email}
-            onChangeText={setEmail}
-            placeholder="Email"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            style={styles.input}
-            placeholderTextColor="#999"
-          />
-          <TextInput
-            value={password}
-            onChangeText={setPassword}
-            placeholder="Password"
-            secureTextEntry
-            style={styles.input}
-            placeholderTextColor="#999"
-          />
+        <TextInput
+          value={email}
+          onChangeText={setEmail}
+          placeholder="Email"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
+        <TextInput
+          value={password}
+          onChangeText={setPassword}
+          placeholder="Password"
+          secureTextEntry
+          style={styles.input}
+          placeholderTextColor="#999"
+        />
 
-          <TouchableOpacity style={styles.button} onPress={signIn}>
-            <Text style={styles.buttonText}>Sign In</Text>
-          </TouchableOpacity>
+        <TouchableOpacity style={styles.button} onPress={signIn}>
+          <Text style={styles.buttonText}>Sign In</Text>
+        </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.button, styles.secondaryButton]}
-            onPress={() => setShowRegister(true)}
-          >
-            <Text style={styles.secondaryText}>Create account</Text>
-          </TouchableOpacity>
-        </View>
-      </ScrollView>
+        <TouchableOpacity
+          style={[styles.button, styles.secondaryButton]}
+          onPress={() => setShowRegister(true)}
+        >
+          <Text style={styles.secondaryText}>Create account</Text>
+        </TouchableOpacity>
+      </View>
     </KeyboardAvoidingView>
   );
 }
@@ -180,9 +177,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#FFF0F5',
-  },
-  scrollContainer: {
-    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
@@ -200,8 +194,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   icon: {
-    width: 100,
-    height: 100,
+    width: 80,
+    height: 80,
     marginBottom: 16,
   },
   title: {
