@@ -10,6 +10,7 @@ import {
   Platform,
   ScrollView,
   Alert,
+  Image,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as DocumentPicker from "expo-document-picker";
@@ -78,13 +79,9 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
       setParticipants(parts);
 
       // default: select first participant if any
-      if (parts.length > 0) {
-        setRecipient(parts[0].email);
-        await loadMessagesForRecipient(parts[0].email);
-      } else {
-        setRecipient(null);
-        setMessages([]);
-      }
+      // do NOT auto-select a recipient. Require the user to search and pick.
+      setRecipient(null);
+      setMessages([]);
     } catch (e) {
       console.warn("Chat loadInitial", e);
     }
@@ -202,27 +199,51 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
   function renderItem({ item }) {
     const mine = item.senderEmail === currentUser.email;
     const toLabel = item.recipientEmail ? `(to ${displayNameForEmail(item.recipientEmail)})` : "";
+    const senderUser = usersMap[item.senderEmail] || {};
+    const senderProfileImage = senderUser.profileImage || null;
+    const initials = (() => {
+      const fn = (senderUser.firstName || "").trim();
+      const ln = (senderUser.lastName || "").trim();
+      if (fn || ln) return (fn.charAt(0) || "") + (ln.charAt(0) || "");
+      if (senderUser.name) return senderUser.name.split(/\s+/).map(p=>p.charAt(0)).slice(0,2).join("");
+      return (item.senderName && item.senderName.charAt(0)) || item.senderEmail.charAt(0) || "?";
+    })();
+
     return (
       <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg]}>
-        <Text style={styles.msgSender}>
-          {item.senderName} {item.recipientEmail ? <Text style={{ fontSize: 12, color: "#666" }}>{toLabel}</Text> : null}
-        </Text>
-        {item.text ? <Text style={styles.msgText}>{item.text}</Text> : null}
-        {item.attachment ? (
-          <TouchableOpacity style={{ marginTop: 6 }} onPress={() => {
-            // optional: don't crash — simply alert file name; implement open-file logic later
-            Alert.alert(item.attachment.name || "Attachment", item.attachment.uri || "");
-          }}>
-            <Text style={{ color: "#007bff" }}>{item.attachment.name || "attachment"}</Text>
-          </TouchableOpacity>
-        ) : null}
-        <Text style={styles.msgDate}>{new Date(item.date).toLocaleString()}</Text>
+        <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
+          {/* Profile Picture or initials */}
+          {senderProfileImage ? (
+            <Image
+              source={{ uri: senderProfileImage }}
+              style={{ width: 36, height: 36, borderRadius: 18, marginRight: 8 }}
+            />
+          ) : (
+            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#ddd", marginRight: 8, justifyContent: "center", alignItems: "center" }}>
+              <Text style={{ fontSize: 12, color: "#444", fontWeight: "700" }}>{initials.toUpperCase()}</Text>
+            </View>
+          )}
+
+          <View style={{ flex: 1 }}>
+            <Text style={styles.msgSender}>
+              {item.senderName} {item.recipientEmail ? <Text style={{ fontSize: 12, color: "#666" }}>{toLabel}</Text> : null}
+            </Text>
+            {item.text ? <Text style={styles.msgText}>{item.text}</Text> : null}
+            {item.attachment ? (
+              <TouchableOpacity style={{ marginTop: 6 }} onPress={() => { Alert.alert(item.attachment.name || "Attachment", item.attachment.uri || ""); }}>
+                <Text style={{ color: "#007bff" }}>{item.attachment.name || "attachment"}</Text>
+              </TouchableOpacity>
+            ) : null}
+            <Text style={styles.msgDate}>{new Date(item.date).toLocaleString()}</Text>
+          </View>
+        </View>
       </View>
     );
   }
 
+  // only show recipients when the user types a search (no pre-listed recipients)
   const filteredParticipants = participants.filter((p) => {
-    if (!search) return true;
+    if (!search) return false;
     return (p.label || p.email).toLowerCase().includes(search.toLowerCase());
   });
 

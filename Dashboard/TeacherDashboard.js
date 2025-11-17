@@ -9,9 +9,11 @@ import {
   Alert,
   FlatList,
   Platform,
+  Image,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
+import * as ImagePicker from "expo-image-picker";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -58,6 +60,14 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   // add state for bottom tab (Home | Manage | Profile)
   const [selectedTab, setSelectedTab] = useState("home");
+  const [studentSearchRemove, setStudentSearchRemove] = useState("");
+  
+  // profile edit state
+  const [profileFirstName, setProfileFirstName] = useState(user?.firstName || "");
+  const [profileLastName, setProfileLastName] = useState(user?.lastName || "");
+  const [profilePassword, setProfilePassword] = useState("");
+  const [profilePasswordConfirm, setProfilePasswordConfirm] = useState("");
+  const [profileImage, setProfileImage] = useState(user?.profileImage || null);
 
   // open/close helpers for class chat
   function openClassChat(classId, ownerEmail) {
@@ -574,22 +584,171 @@ export default function TeacherDashboard({ user, onSignOut }) {
     return renderHome();
   }
 
-  // Profile view: account info + signout
+  async function pickProfileImage() {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+        base64: true,
+      });
+      if (!result.canceled && result.assets && result.assets[0]) {
+        const asset = result.assets[0];
+        // store as base64 data URI for cross-platform compatibility
+        const base64 = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+        setProfileImage(base64);
+      }
+    } catch (e) {
+      console.warn("pickProfileImage error", e);
+      Alert.alert("Error", "Could not pick image");
+    }
+  }
+
+  async function saveProfileChanges() {
+    // allow saving profile fields (name / image) without forcing password change
+    if (profilePassword && profilePasswordConfirm && profilePassword !== profilePasswordConfirm) {
+      Alert.alert("Validation", "Passwords do not match");
+      return;
+    }
+
+    try {
+      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
+      const users = rawUsers ? JSON.parse(rawUsers) : {};
+
+      const existing = users[user.email] || {};
+      const updated = {
+        ...existing,
+        firstName: (profileFirstName || "").trim(),
+        lastName: (profileLastName || "").trim(),
+        profileImage: profileImage || existing.profileImage || null,
+      };
+      // only change password if provided
+      if (profilePassword) updated.password = profilePassword;
+
+      users[user.email] = updated;
+      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+
+      // update local state so UI reflects saved data
+      setUsersMap(users);
+      setProfileFirstName(updated.firstName || "");
+      setProfileLastName(updated.lastName || "");
+      setProfileImage(updated.profileImage || null);
+
+      // clear password inputs
+      setProfilePassword("");
+      setProfilePasswordConfirm("");
+
+      Alert.alert("Success", "Profile updated");
+    } catch (e) {
+      console.warn("saveProfileChanges error", e);
+      Alert.alert("Error", "Could not save profile");
+    }
+  }
+
+  // Profile view: account info + edit fields
   function renderProfileView() {
-    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || user.email;
-    const lastName = (user && (user.lastName || "")) || "";
     return (
       <View style={{ flex: 1, padding: 18, backgroundColor: "#fff" }}>
-        <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 8 }}>Account</Text>
-        <View style={{ backgroundColor: "#f8f9fa", padding: 12, borderRadius: 10 }}>
-          <Text style={{ fontWeight: "700", fontSize: 16 }}>{firstName} {lastName}</Text>
-          <Text style={{ color: "#666", marginTop: 6 }}>{user && user.email}</Text>
-          <Text style={{ color: "#666", marginTop: 6 }}>{user && (user.role || "Teacher")}</Text>
+        <ScrollView showsVerticalScrollIndicator={false}>
+          <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 16 }}>Profile</Text>
+          
+          {/* Profile Picture */}
+          <View style={{ alignItems: "center", marginBottom: 20 }}>
+            <TouchableOpacity
+              onPress={pickProfileImage}
+              style={{
+                width: 120,
+                height: 120,
+                borderRadius: 60,
+                backgroundColor: "#f0f0f0",
+                justifyContent: "center",
+                alignItems: "center",
+                borderWidth: 2,
+                borderColor: "#007bff",
+              }}
+            >
+              {profileImage ? (
+                <Image
+                  source={{ uri: profileImage }}
+                  style={{ width: "100%", height: "100%", borderRadius: 60 }}
+                />
+              ) : (
+                <Text style={{ fontSize: 48 }}>📷</Text>
+              )}
+            </TouchableOpacity>
+            <Text style={{ marginTop: 10, color: "#666", fontSize: 12 }}>Tap to change photo</Text>
+          </View>
 
-          <TouchableOpacity style={[styles.addButton, { marginTop: 12, backgroundColor: "#dc3545" }]} onPress={() => onSignOut && onSignOut()}>
+          {/* Account Info */}
+          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
+            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Account Information</Text>
+            
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>First Name</Text>
+            <TextInput
+              value={profileFirstName}
+              onChangeText={setProfileFirstName}
+              placeholder="First name"
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Last Name</Text>
+            <TextInput
+              value={profileLastName}
+              onChangeText={setProfileLastName}
+              placeholder="Last name"
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Email</Text>
+            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
+              <Text style={{ color: "#333" }}>{user && user.email}</Text>
+            </View>
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Role</Text>
+            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
+              <Text style={{ color: "#333" }}>{user && (user.role || "Teacher")}</Text>
+            </View>
+          </View>
+
+          {/* Change Password */}
+          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
+            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Change Password</Text>
+            
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>New Password</Text>
+            <TextInput
+              value={profilePassword}
+              onChangeText={setProfilePassword}
+              placeholder="Enter new password"
+              secureTextEntry
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Confirm Password</Text>
+            <TextInput
+              value={profilePasswordConfirm}
+              onChangeText={setProfilePasswordConfirm}
+              placeholder="Confirm password"
+              secureTextEntry
+              style={[styles.input, { marginTop: 4 }]}
+            />
+          </View>
+
+          {/* Save & Sign Out */}
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#007bff", marginBottom: 12 }]}
+            onPress={saveProfileChanges}
+          >
+            <Text style={styles.addButtonText}>Save Changes</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#dc3545" }]}
+            onPress={() => onSignOut && onSignOut()}
+          >
             <Text style={styles.addButtonText}>Sign Out</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       </View>
     );
   }
@@ -654,7 +813,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
            style={styles.addButton}
            onPress={() => setView("class")}
          >
-           <Text style={styles.addButtonText}>+ Add Class</Text>
+           <Text style={styles.addButtonText}>Add Class</Text>
          </TouchableOpacity>
          <ScrollView>
            {classesList.length === 0 && (
@@ -662,42 +821,38 @@ export default function TeacherDashboard({ user, onSignOut }) {
            )}
            {classesList.map((cls) => (
              <View key={cls.id} style={styles.classItem}>
+              <TouchableOpacity
+                onPress={() => openClass(cls.id)}
+                style={{ flex: 1 }}
+              >
+                <Text style={styles.classText}>{cls.meta.subject}</Text>
+                <Text style={styles.classText}>
+                  {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
+                </Text>
+              </TouchableOpacity>
+
+              <View style={{ flexDirection: "row", marginTop: 8 }}>
                 <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
                   onPress={() => openClass(cls.id)}
-                  style={{ flex: 1 }}
                 >
-                  <Text style={styles.classText}>{cls.meta.subject}</Text>
-                  <Text style={styles.classText}>
-                    {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
-                  </Text>
+                  <Text style={styles.addButtonText}>Open</Text>
                 </TouchableOpacity>
 
-                <View style={{ flexDirection: "row", marginTop: 8 }}>
-                  <TouchableOpacity
-                    style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
-                    onPress={() => openClass(cls.id)}
-                  >
-                    <Text style={styles.addButtonText}>Open</Text>
-                  </TouchableOpacity>
-
-                  {/* Attendance button removed from Manage list (use Open -> Open Attendance) */}
-
-                  {/* Chat action moved to inside open class view */}
-
-                  <TouchableOpacity
-                    style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
-                    onPress={() => handleClassDeletePress(cls.id)}
-                  >
-                    <Text style={styles.addButtonText}>
-                      {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
+                  onPress={() => handleClassDeletePress(cls.id)}
+                >
+                  <Text style={styles.addButtonText}>
+                    {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
+                  </Text>
+                </TouchableOpacity>
               </View>
-            ))}
-          </ScrollView>
-        </View>
-      );
+            </View>
+          ))}
+        </ScrollView>
+      </View>
+    );
    }
 
   // helper: return normalized user record (guarantee firstName/lastName)
@@ -791,8 +946,11 @@ export default function TeacherDashboard({ user, onSignOut }) {
       );
     }
 
-    // Otherwise show class details
     const sortedStudents = buildSortedStudentsArray(cls.students || []);
+    const filteredStudents = (studentSearchRemove || "").trim()
+      ? sortedStudents.filter((s) => s.display.toLowerCase().includes(studentSearchRemove.toLowerCase()))
+      : [];
+
     return (
       <View style={styles.container}>
         <Text style={styles.header}>{cls.meta.subject}</Text>
@@ -804,11 +962,18 @@ export default function TeacherDashboard({ user, onSignOut }) {
         </TouchableOpacity>
         <View style={styles.studentsContainer}>
           <Text style={styles.subheader}>Students</Text>
-          {sortedStudents.length === 0 && <Text style={styles.emptyText}>No students enrolled</Text>}
-          {sortedStudents.length > 0 && (
-            <ScrollView style={{ maxHeight: 5 * 56, marginTop: 6 }}>
-              {sortedStudents.map((s) => (
-                <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 6 }}>
+          <TextInput
+            value={studentSearchRemove}
+            onChangeText={setStudentSearchRemove}
+            placeholder="Search student to remove..."
+            style={[styles.input, { marginTop: 8 }]}
+          />
+          <ScrollView style={{ maxHeight: 200, marginTop: 8 }}>
+            {filteredStudents.length === 0 ? (
+              <Text style={styles.emptyText}>{studentSearchRemove ? "No students found" : "Type to search"}</Text>
+            ) : (
+              filteredStudents.map((s) => (
+                <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
                   <Text style={styles.studentText}>{s.display}</Text>
                   <TouchableOpacity
                     style={[styles.addButton, { backgroundColor: "#dc3545", paddingVertical: 6, paddingHorizontal: 10 }]}
@@ -817,9 +982,9 @@ export default function TeacherDashboard({ user, onSignOut }) {
                     <Text style={styles.addButtonText}>Remove</Text>
                   </TouchableOpacity>
                 </View>
-              ))}
-            </ScrollView>
-          )}
+              ))
+            )}
+          </ScrollView>
 
           <TextInput
             style={styles.input}
@@ -828,7 +993,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
             onChangeText={setNewStudentEmail}
           />
           <TouchableOpacity style={styles.addButton} onPress={handleAddStudent}>
-            <Text style={styles.addButtonText}>+ Add Student</Text>
+            <Text style={styles.addButtonText}>Add Student</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -851,11 +1016,10 @@ export default function TeacherDashboard({ user, onSignOut }) {
           >
             <Text style={styles.addButtonText}>Chat</Text>
           </TouchableOpacity>
-         </View>
-       </View>
-     );
-
-   }
+        </View>
+      </View>
+    );
+  }
 
   function renderAttendance() {
     const cls = classesList.find((c) => c.id === attendanceClassId);
