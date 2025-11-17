@@ -226,7 +226,6 @@ export default function ChatScreen(props) {
 
   function renderItem({ item }) {
     const mine = item.senderEmail === currentUser.email;
-    const toLabel = item.recipientEmail ? `(to ${displayNameForEmail(item.recipientEmail)})` : "";
     const senderUser = usersMap[item.senderEmail] || {};
     const senderProfileImage = senderUser.profileImage || null;
 
@@ -241,40 +240,38 @@ export default function ChatScreen(props) {
       return (item.senderName && item.senderName.charAt(0)) || (item.senderEmail && item.senderEmail.charAt(0)) || "?";
     })();
 
+    // avatar component (image or initials)
+    const Avatar = (
+      senderProfileImage ? (
+        <Image
+          source={{ uri: senderProfileImage }}
+          style={{ width: 36, height: 36, borderRadius: 18 }}
+        />
+      ) : (
+        <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#ddd", justifyContent: "center", alignItems: "center" }}>
+          <Text style={{ fontSize: 12, color: "#444", fontWeight: "700" }}>{initials.toUpperCase()}</Text>
+        </View>
+      )
+    );
+
     return (
-      <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg]}>
-        <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
-          {/* Profile Picture or initials */}
-          <View style={{ flexShrink: 0, marginRight: 8 }}>
-            {senderProfileImage ? (
-              <Image
-                source={{ uri: senderProfileImage }}
-                style={{ width: 36, height: 36, borderRadius: 18 }}
-              />
-            ) : (
-              <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#ddd", justifyContent: "center", alignItems: "center" }}>
-                <Text style={{ fontSize: 12, color: "#444", fontWeight: "700" }}>{initials.toUpperCase()}</Text>
-              </View>
-            )}
-          </View>
+      // row-reverse for own messages so avatar appears on the right
+      <View style={{ flexDirection: mine ? "row-reverse" : "row", alignItems: "flex-start", marginVertical: 6 }}>
+        <View style={{ flexShrink: 0, marginLeft: mine ? 8 : 0, marginRight: mine ? 0 : 8 }}>
+          {Avatar}
+        </View>
 
-          {/* Message Content */}
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={styles.msgSender}>
-              {item.senderName} {item.recipientEmail ? <Text style={{ fontSize: 12, color: "#666" }}>{toLabel}</Text> : null}
-            </Text>
+        {/* message bubble (no full name / to-label shown) */}
+        <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg, { alignSelf: mine ? "flex-end" : "flex-start" }]}>
+          {body && body.trim().length > 0 ? <Text style={styles.msgText}>{body}</Text> : null}
 
-            {/* show body if present */}
-            {body && body.trim().length > 0 ? <Text style={styles.msgText}>{body}</Text> : null}
+          {item.attachment ? (
+            <TouchableOpacity style={{ marginTop: 6 }} onPress={() => { Alert.alert(item.attachment.name || "Attachment", item.attachment.uri || ""); }}>
+              <Text style={{ color: "#007bff" }}>{item.attachment.name || "attachment"}</Text>
+            </TouchableOpacity>
+          ) : null}
 
-            {item.attachment ? (
-              <TouchableOpacity style={{ marginTop: 6 }} onPress={() => { Alert.alert(item.attachment.name || "Attachment", item.attachment.uri || ""); }}>
-                <Text style={{ color: "#007bff" }}>{item.attachment.name || "attachment"}</Text>
-              </TouchableOpacity>
-            ) : null}
-
-            <Text style={styles.msgDate}>{new Date(item.date).toLocaleString()}</Text>
-          </View>
+          <Text style={styles.msgDate}>{new Date(item.date).toLocaleString()}</Text>
         </View>
       </View>
     );
