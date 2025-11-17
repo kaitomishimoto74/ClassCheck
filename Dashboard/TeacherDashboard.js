@@ -16,7 +16,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
-import { BarCodeScanner } from "expo-barcode-scanner";
+import { CameraView } from "expo-camera/next";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -1170,12 +1170,13 @@ export default function TeacherDashboard({ user, onSignOut }) {
           </TouchableOpacity>
         </View>
 
-        {/* QR Scanner modal */}
+        {/* QR Scanner modal with CameraView */}
         <Modal visible={scannerVisible} transparent={false} onRequestClose={() => setScannerVisible(false)}>
           <View style={{ flex: 1 }}>
-            <BarCodeScanner
-              onBarCodeScanned={handleBarCodeScanned}
+            <CameraView
               style={{ flex: 1 }}
+              onBarCodeScanned={handleBarCodeScanned}
+              barcodeScannerEnabled={true}
             />
             <TouchableOpacity
               onPress={() => setScannerVisible(false)}

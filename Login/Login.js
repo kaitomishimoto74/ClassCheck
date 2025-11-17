@@ -7,7 +7,9 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,  Platform,
+  KeyboardAvoidingView,
+  Platform,
+  Image,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Register from './Register';
@@ -123,7 +125,13 @@ export default function Login() {
   return (
     <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={styles.card}>
-        <Text style={styles.title}>Sign In</Text>
+        {/* App Icon */}
+        <Image
+          source={require('../assets/icon_1.png')}
+          style={styles.icon}
+          resizeMode="contain"
+        />
+        <Text style={styles.title}>ClassCheck</Text>
 
         <TextInput
           value={email}
@@ -182,6 +190,12 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 10,
     elevation: 8,
+    alignItems: 'center',
+  },
+  icon: {
+    width: 80,
+    height: 80,
+    marginBottom: 16,
   },
   title: {
     fontSize: 28,
@@ -205,6 +219,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     marginTop: 8,
+    width: '100%',
   },
   buttonText: {
     color: '#fff',
