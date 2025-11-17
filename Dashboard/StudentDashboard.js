@@ -6,25 +6,45 @@ import {
   ScrollView,
   StyleSheet,
   ActivityIndicator,
+  Image,
+  TextInput,
+  Alert,
+  Modal,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
+import * as ImagePicker from "expo-image-picker";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
 export default function StudentDashboard({ user, onSignOut }) {
   const email = (user && user.email) || "";
+
+  // UI / navigation
+  const [selectedTab, setSelectedTab] = useState("home");
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatTarget, setChatTarget] = useState(null); // { classId, ownerEmail }
+  const [chatTarget, setChatTarget] = useState(null);
   const [loading, setLoading] = useState(true);
   const [usersMap, setUsersMap] = useState({});
-  const [allClassesMap, setAllClassesMap] = useState({}); // ownerEmail -> [classes]
-  const [view, setView] = useState("list"); // list | class
-  const [selectedClass, setSelectedClass] = useState(null); // { cls, ownerEmail }
+  const [allClassesMap, setAllClassesMap] = useState({});
+  const [view, setView] = useState("home");
+  const [selectedClass, setSelectedClass] = useState(null);
+  const [qrModalVisible, setQrModalVisible] = useState(false);
+
+  // profile edit state
+  const [profileFirstName, setProfileFirstName] = useState(user?.firstName || "");
+  const [profileLastName, setProfileLastName] = useState(user?.lastName || "");
+  const [profilePassword, setProfilePassword] = useState("");
+  const [profilePasswordConfirm, setProfilePasswordConfirm] = useState("");
+  const [profileImage, setProfileImage] = useState(user?.profileImage || null);
 
   useEffect(() => {
-    loadData();
+    if (!user) {
+      onSignOut && onSignOut();
+    } else {
+      loadData();
+    }
   }, []);
 
   async function loadData() {
@@ -37,10 +57,74 @@ export default function StudentDashboard({ user, onSignOut }) {
       const rawClasses = await AsyncStorage.getItem(CLASSES_KEY);
       const classes = rawClasses ? JSON.parse(rawClasses) : {};
       setAllClassesMap(classes);
+
+      // sync profile from stored user
+      const currentUser = users[email] || {};
+      setProfileFirstName(currentUser.firstName || user.firstName || "");
+      setProfileLastName(currentUser.lastName || user.lastName || "");
+      setProfileImage(currentUser.profileImage || null);
     } catch (e) {
       console.warn("load student dashboard data", e);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function pickProfileImage() {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+        base64: true,
+      });
+      if (!result.canceled && result.assets && result.assets[0]) {
+        const asset = result.assets[0];
+        const base64 = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+        setProfileImage(base64);
+      }
+    } catch (e) {
+      console.warn("pickProfileImage error", e);
+      Alert.alert("Error", "Could not pick image");
+    }
+  }
+
+  async function saveProfileChanges() {
+    if (profilePassword && profilePasswordConfirm && profilePassword !== profilePasswordConfirm) {
+      Alert.alert("Validation", "Passwords do not match");
+      return;
+    }
+
+    try {
+      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
+      const users = rawUsers ? JSON.parse(rawUsers) : {};
+
+      const existing = users[email] || {};
+      const updated = {
+        ...existing,
+        firstName: (profileFirstName || "").trim(),
+        lastName: (profileLastName || "").trim(),
+        profileImage: profileImage || existing.profileImage || null,
+      };
+
+      if (profilePassword) updated.password = profilePassword;
+
+      users[email] = updated;
+      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+
+      setUsersMap(users);
+      setProfileFirstName(updated.firstName || "");
+      setProfileLastName(updated.lastName || "");
+      setProfileImage(updated.profileImage || null);
+
+      setProfilePassword("");
+      setProfilePasswordConfirm("");
+
+      Alert.alert("Success", "Profile updated");
+    } catch (e) {
+      console.warn("saveProfileChanges error", e);
+      Alert.alert("Error", "Could not save profile");
     }
   }
 
@@ -60,7 +144,6 @@ export default function StudentDashboard({ user, onSignOut }) {
         }
       });
     });
-    // sort by subject then by id
     res.sort((a, b) => {
       const A = (a.cls.meta?.subject || "").toLowerCase();
       const B = (b.cls.meta?.subject || "").toLowerCase();
@@ -71,7 +154,6 @@ export default function StudentDashboard({ user, onSignOut }) {
   }, [allClassesMap, email]);
 
   function getTeacherDisplay(ownerEmail, cls) {
-    // prefer instructor in student's classes meta if present
     const instructor = (cls.meta && cls.meta.instructor) || ownerEmail;
     const t = usersMap[instructor] || usersMap[ownerEmail] || {};
     if (t.lastName && t.firstName) return `${t.lastName}, ${t.firstName}`;
@@ -84,7 +166,6 @@ export default function StudentDashboard({ user, onSignOut }) {
     const hist = Array.isArray(c.attendanceHistory) ? c.attendanceHistory.map((h) => h.date) : [];
     const dates = new Set(Object.keys(att || {}));
     hist.forEach((d) => dates.add(d));
-    // return sorted descending (most recent first)
     return Array.from(dates).sort((a, b) => (a < b ? 1 : -1));
   }
 
@@ -96,7 +177,6 @@ export default function StudentDashboard({ user, onSignOut }) {
         if (c.attendance[d][email]) present += 1;
         return;
       }
-      // fallback to attendanceHistory entry
       if (Array.isArray(c.attendanceHistory)) {
         const h = c.attendanceHistory.find((hh) => hh.date === d);
         if (h && Array.isArray(h.present) && h.present.includes(email)) present += 1;
@@ -109,47 +189,141 @@ export default function StudentDashboard({ user, onSignOut }) {
 
   function openClassDetail(cls, ownerEmail) {
     setSelectedClass({ cls, ownerEmail });
-    setView("class");
+    setView("classDetail");
   }
 
   function closeClassDetail() {
     setSelectedClass(null);
-    setView("list");
+    setView("myClasses");
   }
+
   function openClassChat(cls, ownerEmail) {
     setChatTarget({ classId: cls.id, ownerEmail });
     setChatOpen(true);
   }
+
   function closeClassChat() {
     setChatOpen(false);
     setChatTarget(null);
   }
 
-  // if chat is open, render chat as standalone (matches TeacherDashboard behavior)
-  if (chatOpen && chatTarget) {
-    return (
-      <ChatScreen
-        classId={chatTarget.classId}
-        ownerEmail={chatTarget.ownerEmail}
-        currentUser={user}
-        onClose={closeClassChat}
-      />
-    );
+  function handleNavPress(tab) {
+    setSelectedTab(tab);
+    if (tab === "home") {
+      setView("home");
+    } else if (tab === "myClasses") {
+      setView("myClasses");
+    } else if (tab === "profile") {
+      setView("profile");
+    }
+    setSelectedClass(null);
   }
 
-  if (loading) {
+  function renderHome() {
+    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Student";
     return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" />
+      <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.headerGreeting}>Hello, {firstName}</Text>
+          <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut && onSignOut()}>
+            <Text style={styles.logoutText}>Logout</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView style={{ marginTop: 20 }}>
+          {/* Welcome Message */}
+          <View style={{ backgroundColor: "#e6f3ff", padding: 16, borderRadius: 10, marginBottom: 20 }}>
+            <Text style={{ fontSize: 16, fontWeight: "700", marginBottom: 8 }}>Welcome to ClassCheck</Text>
+            <Text style={{ fontSize: 14, color: "#333", lineHeight: 20 }}>
+              Track your attendance across all your classes. Tap on "My Classes" to view your enrolled courses and attendance records.
+            </Text>
+          </View>
+
+          {/* Quick Actions */}
+          <Text style={{ fontSize: 16, fontWeight: "700", marginBottom: 10 }}>Quick Actions</Text>
+          <TouchableOpacity
+            style={{ padding: 16, backgroundColor: "#f8f9fa", borderRadius: 10, marginBottom: 12, flexDirection: "row", alignItems: "center" }}
+            onPress={() => handleNavPress("myClasses")}
+          >
+            <Text style={{ fontSize: 24, marginRight: 12 }}>📚</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontWeight: "600" }}>My Classes</Text>
+              <Text style={{ fontSize: 12, color: "#666", marginTop: 4 }}>View all enrolled classes</Text>
+            </View>
+            <Text style={{ fontSize: 18 }}>→</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={{ padding: 16, backgroundColor: "#f8f9fa", borderRadius: 10, flexDirection: "row", alignItems: "center" }}
+            onPress={() => handleNavPress("profile")}
+          >
+            <Text style={{ fontSize: 24, marginRight: 12 }}>👤</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontWeight: "600" }}>Edit Profile</Text>
+              <Text style={{ fontSize: 12, color: "#666", marginTop: 4 }}>Update your information</Text>
+            </View>
+            <Text style={{ fontSize: 18 }}>→</Text>
+          </TouchableOpacity>
+        </ScrollView>
       </View>
     );
   }
 
-  if (view === "class" && selectedClass) {
+  function renderMyClasses() {
+    if (loading) {
+      return (
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" />
+        </View>
+      );
+    }
+
+    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || user.email;
+    return (
+      <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.headerGreeting}>{firstName}</Text>
+          <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut && onSignOut()}>
+            <Text style={styles.logoutText}>Logout</Text>
+          </TouchableOpacity>
+        </View>
+
+        <Text style={[styles.header, { marginTop: 12 }]}>My Classes</Text>
+        <ScrollView style={{ marginTop: 8 }}>
+          {classesForStudent.length === 0 && <Text style={styles.emptyText}>You are not enrolled in any classes</Text>}
+          {classesForStudent.map(({ cls, ownerEmail }) => {
+            const stats = computeStats(cls);
+            const teacher = getTeacherDisplay(ownerEmail, cls);
+            return (
+              <View key={cls.id} style={styles.classItem}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.classText}>{cls.meta?.subject || "(no subject)"}</Text>
+                  <Text style={styles.metaText}>{teacher}</Text>
+                  <Text style={{ marginTop: 6 }}>
+                    Present: {stats.present} · Absent: {stats.absent} · Total: {stats.total}
+                  </Text>
+                </View>
+                <View style={{ justifyContent: "center" }}>
+                  <TouchableOpacity style={styles.viewButton} onPress={() => openClassDetail(cls, ownerEmail)}>
+                    <Text style={styles.viewButtonText}>View</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })}
+        </ScrollView>
+      </View>
+    );
+  }
+
+  function renderClassDetail() {
+    if (!selectedClass) return null;
+
     const c = selectedClass.cls;
     const teacher = getTeacherDisplay(selectedClass.ownerEmail, c);
     const stats = computeStats(c);
     const dates = stats.dates;
+
     return (
       <View style={styles.container}>
         <View style={styles.headerRow}>
@@ -159,27 +333,26 @@ export default function StudentDashboard({ user, onSignOut }) {
           </TouchableOpacity>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.metaText}>
-            {c.meta?.department} - {c.meta?.yearLevel} {c.meta?.block}
-          </Text>
-          <Text style={{ marginTop: 8 }}>Teacher: {teacher}</Text>
-          <Text style={{ marginTop: 8, fontWeight: "600" }}>
-            Present: {stats.present} · Absent: {stats.absent} · Total classes: {stats.total}
-          </Text>
+        <ScrollView style={{ marginTop: 12 }}>
+          <View style={styles.card}>
+            <Text style={styles.metaText}>
+              {c.meta?.department} - {c.meta?.yearLevel} {c.meta?.block}
+            </Text>
+            <Text style={{ marginTop: 8 }}>Teacher: {teacher}</Text>
+            <Text style={{ marginTop: 8, fontWeight: "600" }}>
+              Present: {stats.present} · Absent: {stats.absent} · Total classes: {stats.total}
+            </Text>
 
-          <View style={{ flexDirection: "row", marginTop: 12 }}>
-            <TouchableOpacity style={[styles.viewButton, { backgroundColor: "#17a2b8" }]} onPress={() => openClassChat(c, selectedClass.ownerEmail)}>
-              <Text style={styles.viewButtonText}>Chat</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: "row", marginTop: 12 }}>
+              <TouchableOpacity style={[styles.viewButton, { backgroundColor: "#17a2b8" }]} onPress={() => openClassChat(c, selectedClass.ownerEmail)}>
+                <Text style={styles.viewButtonText}>Chat</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
 
-        <Text style={[styles.subheader, { marginTop: 12 }]}>Attendance Records</Text>
-        <ScrollView style={{ marginTop: 8 }}>
+          <Text style={[styles.subheader, { marginTop: 12 }]}>Attendance Records</Text>
           {dates.length === 0 && <Text style={styles.emptyText}>No attendance recorded yet</Text>}
           {dates.map((d) => {
-            // determine this student's status on date
             let presentOnDate = false;
             if (c.attendance && c.attendance[d]) {
               presentOnDate = !!c.attendance[d][email];
@@ -201,43 +374,255 @@ export default function StudentDashboard({ user, onSignOut }) {
     );
   }
 
-  // list view
-  const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || user.email;
-  return (
-    <View style={styles.container}>
-      <View style={styles.headerRow}>
-        <Text style={styles.headerGreeting}>{firstName}</Text>
-        <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut && onSignOut()}>
-          <Text style={styles.logoutText}>Logout</Text>
+  function renderProfile() {
+    return (
+      <View style={{ flex: 1, padding: 18, backgroundColor: "#fff" }}>
+        <ScrollView showsVerticalScrollIndicator={false}>
+          <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 16 }}>Profile</Text>
+
+          {/* Profile Picture */}
+          <View style={{ alignItems: "center", marginBottom: 20 }}>
+            <TouchableOpacity
+              onPress={pickProfileImage}
+              style={{
+                width: 120,
+                height: 120,
+                borderRadius: 60,
+                backgroundColor: "#f0f0f0",
+                justifyContent: "center",
+                alignItems: "center",
+                borderWidth: 2,
+                borderColor: "#007bff",
+              }}
+            >
+              {profileImage ? (
+                <Image
+                  source={{ uri: profileImage }}
+                  style={{ width: "100%", height: "100%", borderRadius: 60 }}
+                  resizeMode="cover"
+                  onError={() => {
+                    console.warn("Profile image failed to load");
+                    setProfileImage(null);
+                  }}
+                />
+              ) : (
+                <Text style={{ fontSize: 48 }}>📷</Text>
+              )}
+            </TouchableOpacity>
+            <Text style={{ marginTop: 10, color: "#666", fontSize: 12 }}>Tap to change photo</Text>
+          </View>
+
+          {/* Account Info */}
+          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
+            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Account Information</Text>
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>First Name</Text>
+            <TextInput
+              value={profileFirstName}
+              onChangeText={setProfileFirstName}
+              placeholder="First name"
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Last Name</Text>
+            <TextInput
+              value={profileLastName}
+              onChangeText={setProfileLastName}
+              placeholder="Last name"
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Email</Text>
+            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
+              <Text style={{ color: "#333" }}>{user && user.email}</Text>
+            </View>
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Role</Text>
+            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
+              <Text style={{ color: "#333" }}>Student</Text>
+            </View>
+          </View>
+
+          {/* QR Code Button */}
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#17a2b8", marginBottom: 16 }]}
+            onPress={() => setQrModalVisible(true)}
+          >
+            <Text style={styles.addButtonText}>📱 View My QR Code</Text>
+          </TouchableOpacity>
+
+          {/* Change Password */}
+          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
+            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Change Password</Text>
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>New Password</Text>
+            <TextInput
+              value={profilePassword}
+              onChangeText={setProfilePassword}
+              placeholder="Enter new password"
+              secureTextEntry
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Confirm Password</Text>
+            <TextInput
+              value={profilePasswordConfirm}
+              onChangeText={setProfilePasswordConfirm}
+              placeholder="Confirm password"
+              secureTextEntry
+              style={[styles.input, { marginTop: 4 }]}
+            />
+          </View>
+
+          {/* Save & Sign Out */}
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#007bff", marginBottom: 12 }]}
+            onPress={saveProfileChanges}
+          >
+            <Text style={styles.addButtonText}>Save Changes</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#dc3545" }]}
+            onPress={() => onSignOut && onSignOut()}
+          >
+            <Text style={styles.addButtonText}>Sign Out</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  function renderQrModal() {
+    const studentName = `${profileFirstName} ${profileLastName}`.trim() || user.email;
+    // Simple text-based QR representation (fallback if library issues)
+    const qrText = user.email;
+    
+    return (
+      <Modal visible={qrModalVisible} transparent={true} animationType="fade" onRequestClose={() => setQrModalVisible(false)}>
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(0,0,0,0.8)",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: 20,
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: "#fff",
+              padding: 24,
+              borderRadius: 12,
+              alignItems: "center",
+              width: "100%",
+            }}
+          >
+            <Text style={{ fontSize: 18, fontWeight: "700", marginBottom: 8 }}>Your QR Code</Text>
+            <Text style={{ fontSize: 14, color: "#666", marginBottom: 20 }}>{studentName}</Text>
+
+            {/* QR Code Box */}
+            <View
+              style={{
+                width: 250,
+                height: 250,
+                backgroundColor: "#f0f0f0",
+                borderWidth: 2,
+                borderColor: "#007bff",
+                borderRadius: 10,
+                justifyContent: "center",
+                alignItems: "center",
+                marginBottom: 16,
+              }}
+            >
+              <Text style={{ fontSize: 12, color: "#666", textAlign: "center", paddingHorizontal: 20 }}>
+                📱 QR Code{"\n"}{qrText}
+              </Text>
+            </View>
+
+            <Text style={{ fontSize: 12, color: "#666", textAlign: "center", marginBottom: 20 }}>
+              This QR code is permanent and unique to your account. Teachers can scan this to mark your attendance.
+            </Text>
+
+            <TouchableOpacity
+              style={[styles.addButton, { backgroundColor: "#007bff", width: "100%" }]}
+              onPress={() => setQrModalVisible(false)}
+            >
+              <Text style={styles.addButtonText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    );
+  }
+
+  function renderBottomNav() {
+    const itemStyle = (active) => ({
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 8,
+      backgroundColor: active ? "#eef6ff" : "#fff",
+    });
+    const iconStyle = (active) => ({ fontSize: 18, color: active ? "#007bff" : "#666" });
+    const labelStyle = (active) => ({ fontSize: 12, color: active ? "#007bff" : "#666", marginTop: 4 });
+
+    return (
+      <View style={{ height: 64, flexDirection: "row", borderTopWidth: 1, borderTopColor: "#eee", backgroundColor: "#fff" }}>
+        <TouchableOpacity style={itemStyle(selectedTab === "home")} onPress={() => handleNavPress("home")}>
+          <Text style={iconStyle(selectedTab === "home")}>🏠</Text>
+          <Text style={labelStyle(selectedTab === "home")}>Home</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={itemStyle(selectedTab === "myClasses")} onPress={() => handleNavPress("myClasses")}>
+          <Text style={iconStyle(selectedTab === "myClasses")}>📚</Text>
+          <Text style={labelStyle(selectedTab === "myClasses")}>My Classes</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={itemStyle(selectedTab === "profile")} onPress={() => handleNavPress("profile")}>
+          <Text style={iconStyle(selectedTab === "profile")}>👤</Text>
+          <Text style={labelStyle(selectedTab === "profile")}>Profile</Text>
         </TouchableOpacity>
       </View>
+    );
+  }
 
-      <Text style={[styles.header, { marginTop: 12 }]}>My Classes</Text>
-      <ScrollView style={{ marginTop: 8 }}>
-        {classesForStudent.length === 0 && <Text style={styles.emptyText}>You are not enrolled in any classes</Text>}
-        {classesForStudent.map(({ cls, ownerEmail }) => {
-           const stats = computeStats(cls);
-           const teacher = getTeacherDisplay(ownerEmail, cls);
-           return (
-             <View key={cls.id} style={styles.classItem}>
-               <View style={{ flex: 1 }}>
-                 <Text style={styles.classText}>{cls.meta?.subject || "(no subject)"}</Text>
-                 <Text style={styles.metaText}>{teacher}</Text>
-                 <Text style={{ marginTop: 6 }}>
-                   Present: {stats.present} · Absent: {stats.absent} · Total: {stats.total}
-                 </Text>
-               </View>
-               <View style={{ justifyContent: "center" }}>
-                 <TouchableOpacity style={styles.viewButton} onPress={() => openClassDetail(cls, ownerEmail)}>
-                   <Text style={styles.viewButtonText}>View</Text>
-                 </TouchableOpacity>
-               </View>
-             </View>
-           );
-         })}
-       </ScrollView>
-     </View>
-   );
+  // if chat is open, render chat as overlay
+  if (chatOpen && chatTarget) {
+    return (
+      <View style={{ flex: 1 }}>
+        <ChatScreen
+          classId={chatTarget.classId}
+          ownerEmail={chatTarget.ownerEmail}
+          currentUser={user}
+          onClose={closeClassChat}
+        />
+        {renderBottomNav()}
+      </View>
+    );
+  }
+
+  let mainContent = null;
+
+  if (view === "home") {
+    mainContent = renderHome();
+  } else if (view === "myClasses") {
+    mainContent = renderMyClasses();
+  } else if (view === "classDetail") {
+    mainContent = renderClassDetail();
+  } else if (view === "profile") {
+    mainContent = renderProfile();
+  } else {
+    mainContent = renderHome();
+  }
+
+  return (
+    <View style={{ flex: 1 }}>
+      {mainContent}
+      {renderQrModal()}
+      {renderBottomNav()}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -257,4 +642,23 @@ const styles = StyleSheet.create({
   card: { padding: 12, borderRadius: 8, backgroundColor: "#f8f9fa", marginTop: 12 },
   subheader: { fontSize: 16, fontWeight: "600" },
   recordRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#eee" },
+  input: {
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 5,
+    padding: 10,
+    marginTop: 10,
+  },
+  addButton: {
+    marginTop: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    backgroundColor: "#28a745",
+    borderRadius: 5,
+    alignItems: "center",
+  },
+  addButtonText: {
+    color: "#fff",
+    fontSize: 16,
+  },
 });

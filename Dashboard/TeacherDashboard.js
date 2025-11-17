@@ -10,10 +10,13 @@ import {
   FlatList,
   Platform,
   Image,
+  Modal,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
+import { BarCodeScanner } from "expo-barcode-scanner";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
