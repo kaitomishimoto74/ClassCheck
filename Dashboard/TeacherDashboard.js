@@ -790,12 +790,6 @@ export default function TeacherDashboard({ user, onSignOut }) {
      const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
      return (
        <View style={styles.container}>
-         <View style={styles.headerRow}>
-           <Text style={styles.headerGreeting}>Hello, {firstName}</Text>
-           <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut()}>
-             <Text style={styles.logoutText}>Logout</Text>
-           </TouchableOpacity>
-         </View>
   
          <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
          <TouchableOpacity
@@ -1101,9 +1095,6 @@ export default function TeacherDashboard({ user, onSignOut }) {
             }}
           >
             <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>📷 Scan</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.logoutButton} onPress={() => setView("class")}>
-            <Text style={styles.logoutText}>Back</Text>
           </TouchableOpacity>
         </View>
 
