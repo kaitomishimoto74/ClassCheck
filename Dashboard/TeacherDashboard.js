@@ -565,12 +565,6 @@ export default function TeacherDashboard({ user, onSignOut }) {
         <Text style={styles.subtitle}>Your teaching dashboard</Text>
         <TouchableOpacity
           style={styles.button}
-          onPress={() => setView("manage")}
-        >
-          <Text style={styles.buttonText}>Manage Classes</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.button}
           onPress={() => onSignOut()}
         >
           <Text style={styles.buttonText}>Sign Out</Text>
@@ -587,7 +581,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
   async function pickProfileImage() {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ImagePicker.MediaType.Images,
         allowsEditing: true,
         aspect: [1, 1],
         quality: 0.8,

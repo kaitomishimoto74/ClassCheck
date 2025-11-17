@@ -211,20 +211,23 @@ export default function ChatScreen({ classId, ownerEmail, currentUser, onClose }
 
     return (
       <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg]}>
-        <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
           {/* Profile Picture or initials */}
-          {senderProfileImage ? (
-            <Image
-              source={{ uri: senderProfileImage }}
-              style={{ width: 36, height: 36, borderRadius: 18, marginRight: 8 }}
-            />
-          ) : (
-            <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#ddd", marginRight: 8, justifyContent: "center", alignItems: "center" }}>
-              <Text style={{ fontSize: 12, color: "#444", fontWeight: "700" }}>{initials.toUpperCase()}</Text>
-            </View>
-          )}
+          <View style={{ flexShrink: 0 }}>
+            {senderProfileImage ? (
+              <Image
+                source={{ uri: senderProfileImage }}
+                style={{ width: 36, height: 36, borderRadius: 18 }}
+              />
+            ) : (
+              <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#ddd", justifyContent: "center", alignItems: "center" }}>
+                <Text style={{ fontSize: 12, color: "#444", fontWeight: "700" }}>{initials.toUpperCase()}</Text>
+              </View>
+            )}
+          </View>
 
-          <View style={{ flex: 1 }}>
+          {/* Message Content */}
+          <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={styles.msgSender}>
               {item.senderName} {item.recipientEmail ? <Text style={{ fontSize: 12, color: "#666" }}>{toLabel}</Text> : null}
             </Text>
