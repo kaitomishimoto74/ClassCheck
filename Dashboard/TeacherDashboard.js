@@ -72,6 +72,10 @@ export default function TeacherDashboard({ user, onSignOut }) {
   const [profilePasswordConfirm, setProfilePasswordConfirm] = useState("");
   const [profileImage, setProfileImage] = useState(user?.profileImage || null);
 
+  // Add state for QR scanner at the top with other states
+  const [scannerVisible, setScannerVisible] = useState(false);
+  const [hasScannerPermission, setHasScannerPermission] = useState(null);
+
   // open/close helpers for class chat
   function openClassChat(classId, ownerEmail) {
     setChatTarget({ classId, ownerEmail });
@@ -1018,6 +1022,57 @@ export default function TeacherDashboard({ user, onSignOut }) {
     );
   }
 
+  async function requestScannerPermission() {
+    try {
+      const { status } = await BarCodeScanner.requestPermissionsAsync();
+      const granted = status === "granted";
+      setHasScannerPermission(granted);
+      if (!granted) Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
+      return granted;
+    } catch (e) {
+      console.warn("requestScannerPermission", e);
+      Alert.alert("Permission error", "Could not request camera permission.");
+      return false;
+    }
+  }
+
+  async function openQrScanner() {
+    const ok = await requestScannerPermission();
+    if (!ok) return;
+    setScannerVisible(true);
+  }
+
+  function handleBarCodeScanned({ data }) {
+    // data contains the scanned QR code (student email)
+    const studentEmail = (data || "").trim().toLowerCase();
+    
+    // check if this email exists in current attendance class
+    const cls = classesList.find((c) => c.id === attendanceClassId);
+    if (!cls) {
+      Alert.alert("Error", "Class not found");
+      setScannerVisible(false);
+      return;
+    }
+
+    // check if student is enrolled
+    const isEnrolled = (cls.students || []).some((s) => {
+      const em = typeof s === "string" ? s : s?.email;
+      return em === studentEmail;
+    });
+
+    if (!isEnrolled) {
+      Alert.alert("Not enrolled", `${studentEmail} is not in this class`);
+      setScannerVisible(false);
+      return;
+    }
+
+    // mark as present automatically
+    setAttendanceState((prev) => ({ ...prev, [studentEmail]: true }));
+
+    Alert.alert("Success", `${studentEmail} marked present`);
+    setScannerVisible(false);
+  }
+
   function renderAttendance() {
     const cls = classesList.find((c) => c.id === attendanceClassId);
     if (!cls) return null;
@@ -1038,6 +1093,18 @@ export default function TeacherDashboard({ user, onSignOut }) {
           <Text style={styles.headerGreeting}>
             {cls.meta.subject} — Attendance {attendanceDate}
           </Text>
+          <TouchableOpacity
+            onPress={openQrScanner}
+            style={{
+              backgroundColor: "#007bff",
+              paddingVertical: 6,
+              paddingHorizontal: 10,
+              borderRadius: 6,
+              marginRight: 8,
+            }}
+          >
+            <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>📷 Scan</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.logoutButton} onPress={() => setView("class")}>
             <Text style={styles.logoutText}>Back</Text>
           </TouchableOpacity>
@@ -1102,6 +1169,22 @@ export default function TeacherDashboard({ user, onSignOut }) {
             <Text style={styles.addButtonText}>Save Attendance</Text>
           </TouchableOpacity>
         </View>
+
+        {/* QR Scanner modal */}
+        <Modal visible={scannerVisible} transparent={false} onRequestClose={() => setScannerVisible(false)}>
+          <View style={{ flex: 1 }}>
+            <BarCodeScanner
+              onBarCodeScanned={handleBarCodeScanned}
+              style={{ flex: 1 }}
+            />
+            <TouchableOpacity
+              onPress={() => setScannerVisible(false)}
+              style={{ position: "absolute", top: 40, right: 20, padding: 10, backgroundColor: "#fff", borderRadius: 6 }}
+            >
+              <Text style={{ color: "#007bff", fontWeight: "700" }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </Modal>
       </View>
     );
   }

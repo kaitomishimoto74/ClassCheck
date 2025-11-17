@@ -14,6 +14,7 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
+import QRCode from "react-native-qrcode-svg";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -225,9 +226,6 @@ export default function StudentDashboard({ user, onSignOut }) {
       <View style={styles.container}>
         <View style={styles.headerRow}>
           <Text style={styles.headerGreeting}>Hello, {firstName}</Text>
-          <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut && onSignOut()}>
-            <Text style={styles.logoutText}>Logout</Text>
-          </TouchableOpacity>
         </View>
 
         <ScrollView style={{ marginTop: 20 }}>
@@ -282,10 +280,7 @@ export default function StudentDashboard({ user, onSignOut }) {
     return (
       <View style={styles.container}>
         <View style={styles.headerRow}>
-          <Text style={styles.headerGreeting}>{firstName}</Text>
-          <TouchableOpacity style={styles.logoutButton} onPress={() => onSignOut && onSignOut()}>
-            <Text style={styles.logoutText}>Logout</Text>
-          </TouchableOpacity>
+          
         </View>
 
         <Text style={[styles.header, { marginTop: 12 }]}>My Classes</Text>
@@ -495,8 +490,6 @@ export default function StudentDashboard({ user, onSignOut }) {
 
   function renderQrModal() {
     const studentName = `${profileFirstName} ${profileLastName}`.trim() || user.email;
-    // Simple text-based QR representation (fallback if library issues)
-    const qrText = user.email;
     
     return (
       <Modal visible={qrModalVisible} transparent={true} animationType="fade" onRequestClose={() => setQrModalVisible(false)}>
@@ -521,23 +514,23 @@ export default function StudentDashboard({ user, onSignOut }) {
             <Text style={{ fontSize: 18, fontWeight: "700", marginBottom: 8 }}>Your QR Code</Text>
             <Text style={{ fontSize: 14, color: "#666", marginBottom: 20 }}>{studentName}</Text>
 
-            {/* QR Code Box */}
+            {/* QR Code */}
             <View
               style={{
-                width: 250,
-                height: 250,
-                backgroundColor: "#f0f0f0",
+                padding: 16,
+                backgroundColor: "#fff",
                 borderWidth: 2,
                 borderColor: "#007bff",
                 borderRadius: 10,
-                justifyContent: "center",
-                alignItems: "center",
                 marginBottom: 16,
               }}
             >
-              <Text style={{ fontSize: 12, color: "#666", textAlign: "center", paddingHorizontal: 20 }}>
-                📱 QR Code{"\n"}{qrText}
-              </Text>
+              <QRCode
+                value={user.email}
+                size={220}
+                color="black"
+                backgroundColor="white"
+              />
             </View>
 
             <Text style={{ fontSize: 12, color: "#666", textAlign: "center", marginBottom: 20 }}>
