@@ -14,6 +14,10 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
+import { Camera, useCameraPermissions } from "expo-camera";
+
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -34,6 +38,7 @@ function convoKey(a, b) {
 // - onClose()
 export default function ChatScreen(props) {
   const { classId, ownerEmail, currentUser, onClose } = props;
+  const [permission, requestPermission] = useCameraPermissions();
   const [usersMap, setUsersMap] = useState({});
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
@@ -170,26 +175,40 @@ export default function ChatScreen(props) {
     }
 
     try {
-      // expo-document-picker works on Expo-managed apps and supports web/android/ios.
       const res = await DocumentPicker.getDocumentAsync({
         type: Platform.OS === "web" ? ["image/*", "application/pdf", "*/*"] : "*/*",
         copyToCacheDirectory: false,
       });
+      
       if (!res || res.type === "cancel") return;
+      
+      // Get file size using FileSystem
+      let fileSize = 0;
+      try {
+        const fileInfo = await FileSystem.getInfoAsync(res.uri);
+        fileSize = fileInfo.size || 0;
+      } catch (e) {
+        console.warn("Could not get file size", e);
+        fileSize = 0;
+      }
+
       const attachment = {
         name: res.name || "file",
         uri: res.uri,
+        size: fileSize,
         type: res.mimeType || "application/octet-stream",
       };
+      
       const msg = {
         id: genId(),
         senderEmail: currentUser.email,
         senderName: getSenderName(currentUser.email),
         recipientEmail: recipient || null,
-        text: "",
+        text: `📎 Shared file: ${res.name || "file"}`,
         date: new Date().toISOString(),
         attachment,
       };
+      
       await persistMessage(msg);
     } catch (err) {
       console.warn("attach error", err);
@@ -255,19 +274,63 @@ export default function ChatScreen(props) {
     );
 
     return (
-      // row-reverse for own messages so avatar appears on the right
       <View style={{ flexDirection: mine ? "row-reverse" : "row", alignItems: "flex-start", marginVertical: 6 }}>
         <View style={{ flexShrink: 0, marginLeft: mine ? 8 : 0, marginRight: mine ? 0 : 8 }}>
           {Avatar}
         </View>
 
-        {/* message bubble (no full name / to-label shown) */}
+        {/* message bubble */}
         <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg, { alignSelf: mine ? "flex-end" : "flex-start" }]}>
           {body && body.trim().length > 0 ? <Text style={styles.msgText}>{body}</Text> : null}
 
-          {item.attachment ? (
-            <TouchableOpacity style={{ marginTop: 6 }} onPress={() => { Alert.alert(item.attachment.name || "Attachment", item.attachment.uri || ""); }}>
-              <Text style={{ color: "#007bff" }}>{item.attachment.name || "attachment"}</Text>
+          {item.attachment && item.attachment.uri ? (
+            <TouchableOpacity
+              style={{
+                marginTop: body ? 8 : 0,
+                backgroundColor: mine ? "#28a745" : "#007bff",
+                padding: 12,
+                borderRadius: 8,
+                flexDirection: "row",
+                alignItems: "center",
+              }}
+              onPress={async () => {
+                try {
+                  if (Platform.OS === "web") {
+                    // Web: download file
+                    const link = document.createElement("a");
+                    link.href = item.attachment.uri;
+                    link.download = item.attachment.name || "file";
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    Alert.alert("Success", "File downloaded!");
+                  } else {
+                    // Mobile: use Sharing API to open/download
+                    const Sharing = require("expo-sharing").default;
+                    if (await Sharing.isAvailableAsync()) {
+                      await Sharing.shareAsync(item.attachment.uri, {
+                        mimeType: item.attachment.type,
+                        dialogTitle: item.attachment.name,
+                      });
+                    } else {
+                      Alert.alert("File", item.attachment.uri);
+                    }
+                  }
+                } catch (e) {
+                  console.warn("Download error", e);
+                  Alert.alert("Error", "Could not download file");
+                }
+              }}
+            >
+              <Text style={{ fontSize: 20, marginRight: 8 }}>📥</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: "600", color: "#fff", fontSize: 13 }}>
+                  {item.attachment.name || "File"}
+                </Text>
+                <Text style={{ color: mine ? "#c8e6c9" : "#b3d9ff", fontSize: 11, marginTop: 4 }}>
+                  {((item.attachment.size || 0) / 1024).toFixed(2)} KB • Tap to download
+                </Text>
+              </View>
             </TouchableOpacity>
           ) : null}
 
@@ -282,6 +345,29 @@ export default function ChatScreen(props) {
     if (!search) return false;
     return (p.label || p.email).toLowerCase().includes(search.toLowerCase());
   });
+
+  async function requestScannerPermission() {
+    try {
+      if (!permission) {
+        const { granted } = await requestPermission();
+        if (!granted) {
+          Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
+          return false;
+        }
+        return true;
+      }
+      
+      if (!permission.granted) {
+        Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.warn("requestScannerPermission", e);
+      Alert.alert("Permission error", "Could not request camera permission.");
+      return false;
+    }
+  }
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.container}>
