@@ -18,7 +18,6 @@ import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { Camera, useCameraPermissions } from "expo-camera";
 
-
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
@@ -31,19 +30,14 @@ function convoKey(a, b) {
   return x < y ? `${x}|${y}` : `${y}|${x}`;
 }
 
-// ChatScreen props:
-// - classId
-// - ownerEmail (instructor account that owns the class)
-// - currentUser { email, firstName, lastName, name }
-// - onClose()
 export default function ChatScreen(props) {
   const { classId, ownerEmail, currentUser, onClose } = props;
   const [permission, requestPermission] = useCameraPermissions();
   const [usersMap, setUsersMap] = useState({});
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
-  const [participants, setParticipants] = useState([]); // [{ label, email }]
-  const [recipient, setRecipient] = useState(null); // email of the other participant
+  const [participants, setParticipants] = useState([]);
+  const [recipient, setRecipient] = useState(null);
   const [search, setSearch] = useState("");
   const flatRef = useRef(null);
 
@@ -72,7 +66,6 @@ export default function ChatScreen(props) {
       const list = Array.isArray(classes[ownerEmail]) ? classes[ownerEmail] : [];
       const cls = list.find((c) => c.id === classId) || {};
 
-      // build participants: teacher + students (labels = First Last), exclude current user
       const parts = [];
       const teacherEmail = ownerEmail;
       const teacherName = displayNameForEmail(teacherEmail, users);
@@ -83,9 +76,6 @@ export default function ChatScreen(props) {
         if (em && em !== currentUser.email) parts.push({ label: displayNameForEmail(em, users) || em, email: em });
       });
       setParticipants(parts);
-
-      // default: select first participant if any
-      // do NOT auto-select a recipient. Require the user to search and pick.
       setRecipient(null);
       setMessages([]);
     } catch (e) {
@@ -116,7 +106,6 @@ export default function ChatScreen(props) {
   async function persistMessage(msg) {
     try {
       if (!msg.recipientEmail) {
-        // we only persist private convos in this implementation
         return;
       }
       const raw = await AsyncStorage.getItem(CLASSES_KEY);
@@ -137,7 +126,6 @@ export default function ChatScreen(props) {
       classes[ownerEmail] = list;
       await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(classes));
 
-      // update local messages only for currently selected recipient
       if (recipient && convoKey(currentUser.email, msg.recipientEmail) === convoKey(currentUser.email, recipient)) {
         setMessages((prev) => [...prev, msg]);
         setTimeout(() => flatRef.current && flatRef.current.scrollToEnd({ animated: true }), 80);
@@ -167,7 +155,6 @@ export default function ChatScreen(props) {
     await persistMessage(msg);
   }
 
-  // attachment picker (dynamic require to avoid crash if lib not installed)
   async function handleAttach() {
     if (!recipient) {
       Alert.alert("No recipient", "Select a person to send the attachment to.");
@@ -175,8 +162,45 @@ export default function ChatScreen(props) {
     }
 
     try {
+      // Web file handling
+      if (Platform.OS === "web") {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.onchange = async (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+
+          const reader = new FileReader();
+          reader.onload = async (event) => {
+            const base64 = event.target.result;
+            const attachment = {
+              name: file.name,
+              uri: base64,
+              size: file.size,
+              type: file.type || "application/octet-stream",
+            };
+
+            const msg = {
+              id: genId(),
+              senderEmail: currentUser.email,
+              senderName: getSenderName(currentUser.email),
+              recipientEmail: recipient || null,
+              text: `📎 Shared file: ${file.name}`,
+              date: new Date().toISOString(),
+              attachment,
+            };
+
+            await persistMessage(msg);
+          };
+          reader.readAsDataURL(file);
+        };
+        input.click();
+        return;
+      }
+
+      // Mobile file handling
       const res = await DocumentPicker.getDocumentAsync({
-        type: Platform.OS === "web" ? ["image/*", "application/pdf", "*/*"] : "*/*",
+        type: "*/*",
         copyToCacheDirectory: false,
       });
       
@@ -192,9 +216,17 @@ export default function ChatScreen(props) {
         fileSize = 0;
       }
 
+      // Copy file to persistent cache directory for mobile
+      const cacheDir = `${FileSystem.cacheDirectory}ClassCheckAttachments/`;
+      await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true }).catch(() => {});
+      
+      const fileName = res.name || `file_${Date.now()}`;
+      const newUri = `${cacheDir}${fileName}`;
+      await FileSystem.copyAsync({ from: res.uri, to: newUri });
+
       const attachment = {
         name: res.name || "file",
-        uri: res.uri,
+        uri: newUri,
         size: fileSize,
         type: res.mimeType || "application/octet-stream",
       };
@@ -216,39 +248,25 @@ export default function ChatScreen(props) {
     }
   }
 
-  // ensure we load latest users (so profileImage persists and is available in chat)
   async function reloadUsersMap() {
     try {
       const raw = await AsyncStorage.getItem(USERS_KEY);
       const u = raw ? JSON.parse(raw) : {};
       setUsersMap(u);
     } catch (e) {
-      // ignore, keep previous usersMap
       if (__DEV__) console.warn("reloadUsersMap error", e);
     }
   }
 
   useEffect(() => {
-    // load users once on mount so sender profile images are available
     reloadUsersMap();
   }, []);
-
-  // If you already have a function that persists messages (persistMessage/sendMessage),
-  // call reloadUsersMap() after saving a message so the UI picks up any recent profile changes.
-  // Example patch you can apply where you persist messages:
-  //
-  // await persistMessage(msg);
-  // reloadUsersMap();
-  //
-  // (I did not modify unknown send function here to avoid breaking behaviour;
-  //  if you want I can patch the exact send function once you paste it.)
 
   function renderItem({ item }) {
     const mine = item.senderEmail === currentUser.email;
     const senderUser = usersMap[item.senderEmail] || {};
     const senderProfileImage = senderUser.profileImage || null;
 
-    // robust body detection (handles different saved keys)
     const body = (item.text || item.message || item.body || item.content || "").toString();
 
     const initials = (() => {
@@ -259,7 +277,6 @@ export default function ChatScreen(props) {
       return (item.senderName && item.senderName.charAt(0)) || (item.senderEmail && item.senderEmail.charAt(0)) || "?";
     })();
 
-    // avatar component (image or initials)
     const Avatar = (
       senderProfileImage ? (
         <Image
@@ -279,7 +296,6 @@ export default function ChatScreen(props) {
           {Avatar}
         </View>
 
-        {/* message bubble */}
         <View style={[styles.msgRow, mine ? styles.myMsg : styles.theirMsg, { alignSelf: mine ? "flex-end" : "flex-start" }]}>
           {body && body.trim().length > 0 ? <Text style={styles.msgText}>{body}</Text> : null}
 
@@ -296,7 +312,7 @@ export default function ChatScreen(props) {
               onPress={async () => {
                 try {
                   if (Platform.OS === "web") {
-                    // Web: download file
+                    // Web: download file from base64
                     const link = document.createElement("a");
                     link.href = item.attachment.uri;
                     link.download = item.attachment.name || "file";
@@ -305,15 +321,14 @@ export default function ChatScreen(props) {
                     document.body.removeChild(link);
                     Alert.alert("Success", "File downloaded!");
                   } else {
-                    // Mobile: use Sharing API to open/download
-                    const Sharing = require("expo-sharing").default;
+                    // Mobile: use Sharing API
                     if (await Sharing.isAvailableAsync()) {
                       await Sharing.shareAsync(item.attachment.uri, {
                         mimeType: item.attachment.type,
                         dialogTitle: item.attachment.name,
                       });
                     } else {
-                      Alert.alert("File", item.attachment.uri);
+                      Alert.alert("File Info", `${item.attachment.name} - ${((item.attachment.size || 0) / 1024).toFixed(2)} KB`);
                     }
                   }
                 } catch (e) {
@@ -340,7 +355,6 @@ export default function ChatScreen(props) {
     );
   }
 
-  // only show recipients when the user types a search (no pre-listed recipients)
   const filteredParticipants = participants.filter((p) => {
     if (!search) return false;
     return (p.label || p.email).toLowerCase().includes(search.toLowerCase());
