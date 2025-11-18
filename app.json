@@ -20,10 +20,16 @@
         "foregroundImage": "./assets/icon_1.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.jovan_misiona.ClassCheck"
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "56cdc79d-8c02-4983-b8f0-7fc8b9eeaaf7"
+      }
     }
   }
 }

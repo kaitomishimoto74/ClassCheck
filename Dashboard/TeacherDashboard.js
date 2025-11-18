@@ -11,10 +11,12 @@ import {
   Alert,
   Modal,
   Platform,
+  Linking,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Camera, useCameraPermissions } from "expo-camera";
 import ChatScreen from "./ChatScreen";
+import * as ImagePicker from "expo-image-picker";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -63,6 +65,11 @@ export default function TeacherDashboard({ user, onSignOut }) {
   // Add state for QR scanner at the top with other states
   const [scannerVisible, setScannerVisible] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
+
+  // keep explicit camera permission state (use Camera.requestCameraPermissionsAsync/getCameraPermissionsAsync)
+  const [hasCameraPermission, setHasCameraPermission] = useState(false);
+  // prevent multiple rapid scans from crashing app
+  const [scanned, setScanned] = useState(false);
 
   // open/close helpers for class chat
   function openClassChat(classId, ownerEmail) {
@@ -584,7 +591,6 @@ export default function TeacherDashboard({ user, onSignOut }) {
       });
       if (!result.canceled && result.assets && result.assets[0]) {
         const asset = result.assets[0];
-        // store as base64 data URI for cross-platform compatibility
         const base64 = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
         setProfileImage(base64);
       }
@@ -642,7 +648,6 @@ export default function TeacherDashboard({ user, onSignOut }) {
         <ScrollView showsVerticalScrollIndicator={false}>
           <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 16 }}>Profile</Text>
           
-          {/* Profile Picture */}
           <View style={{ alignItems: "center", marginBottom: 20 }}>
             <TouchableOpacity
               onPress={pickProfileImage}
@@ -661,6 +666,11 @@ export default function TeacherDashboard({ user, onSignOut }) {
                 <Image
                   source={{ uri: profileImage }}
                   style={{ width: "100%", height: "100%", borderRadius: 60 }}
+                  resizeMode="cover"
+                  onError={() => {
+                    console.warn("Profile image failed to load");
+                    setProfileImage(null);
+                  }}
                 />
               ) : (
                 <Text style={{ fontSize: 48 }}>📷</Text>
@@ -898,24 +908,28 @@ export default function TeacherDashboard({ user, onSignOut }) {
           <TextInput
             style={styles.input}
             placeholder="Subject"
+            placeholderTextColor="#666"
             value={subject}
             onChangeText={setSubject}
           />
           <TextInput
             style={styles.input}
             placeholder="Department"
+            placeholderTextColor="#666"
             value={department}
             onChangeText={setDepartment}
           />
           <TextInput
             style={styles.input}
             placeholder="Year Level"
+            placeholderTextColor="#666"
             value={yearLevel}
             onChangeText={setYearLevel}
           />
           <TextInput
             style={styles.input}
             placeholder="Block"
+            placeholderTextColor="#666"
             value={block}
             onChangeText={setBlock}
           />
@@ -966,7 +980,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
                   </TouchableOpacity>
                 </View>
               ))
-            )}
+           )}
           </ScrollView>
 
           <TextInput
@@ -1006,62 +1020,64 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   async function requestScannerPermission() {
     try {
-      if (!permission) {
-        const { granted } = await requestPermission();
-        if (!granted) {
-          Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
-          return false;
-        }
-        return true;
-      }
-      
-      if (!permission.granted) {
-        Alert.alert("Camera permission", "Camera permission is required to scan QR codes.");
+      const res = await Camera.requestCameraPermissionsAsync();
+      const granted = !!(res && (res.granted || res.status === "granted"));
+      setHasCameraPermission(granted);
+      if (!granted) {
+        Alert.alert(
+          "Camera permission",
+          "Camera permission is required to scan QR codes. Open app settings to allow it.",
+          [
+            { text: "Open settings", onPress: () => Linking.openSettings() },
+            { text: "Cancel", style: "cancel" },
+          ]
+        );
         return false;
       }
       return true;
-     } catch (e) {
-       console.warn("requestScannerPermission", e);
-       Alert.alert("Permission error", "Could not request camera permission.");
-       return false;
-     }
-   }
+    } catch (e) {
+      console.warn("requestScannerPermission", e);
+      Alert.alert("Permission error", "Could not request camera permission. Open app settings to enable it.");
+      return false;
+    }
+  }
 
    async function openQrScanner() {
      const ok = await requestScannerPermission();
      if (!ok) return;
+     // reset scanned flag before opening
+     setScanned(false);
      setScannerVisible(true);
    }
-
+ 
    function handleBarCodeScanned({ data }) {
-     // data contains the scanned QR code (student email)
-     const studentEmail = (data || "").trim().toLowerCase();
-     
-     // check if this email exists in current attendance class
-     const cls = classesList.find((c) => c.id === attendanceClassId);
-     if (!cls) {
-       Alert.alert("Error", "Class not found");
-       setScannerVisible(false);
-       return;
-     }
-
-     // check if student is enrolled
-     const isEnrolled = (cls.students || []).some((s) => {
-       const em = typeof s === "string" ? s : s?.email;
-       return em === studentEmail;
-     });
-
-     if (!isEnrolled) {
-       Alert.alert("Not enrolled", `${studentEmail} is not in this class`);
-       setScannerVisible(false);
-       return;
-     }
-
-     // mark as present automatically
-     setAttendanceState((prev) => ({ ...prev, [studentEmail]: true }));
-
-     Alert.alert("Success", `${studentEmail} marked present`);
-     setScannerVisible(false);
+    if (scanned) return;
+    setScanned(true);
+    try {
+      const studentEmail = (data || "").trim().toLowerCase();
+      const cls = classesList.find((c) => c.id === attendanceClassId);
+      if (!cls) {
+        Alert.alert("Error", "Class not found");
+        setTimeout(() => setScannerVisible(false), 200);
+        return;
+      }
+      const isEnrolled = (cls.students || []).some((s) => {
+        const em = typeof s === "string" ? s : s?.email;
+        return em === studentEmail;
+      });
+      if (!isEnrolled) {
+        Alert.alert("Not enrolled", `${studentEmail} is not in this class`);
+        setTimeout(() => setScannerVisible(false), 200);
+        return;
+      }
+      setAttendanceState((prev) => ({ ...prev, [studentEmail]: true }));
+      Alert.alert("Success", `${studentEmail} marked present`);
+      // close after short delay so alert + camera teardown don't race
+      setTimeout(() => setScannerVisible(false), 300);
+    } catch (err) {
+      console.warn("handleBarCodeScanned error", err);
+      setTimeout(() => setScannerVisible(false), 200);
+    }
    }
 
   function renderAttendance() {
@@ -1161,13 +1177,31 @@ export default function TeacherDashboard({ user, onSignOut }) {
         {/* QR Scanner Modal with Camera */}
         <Modal visible={scannerVisible} transparent={false} onRequestClose={() => setScannerVisible(false)}>
           <View style={{ flex: 1 }}>
-            <Camera
-              style={{ flex: 1 }}
-              onBarcodeScanned={handleBarCodeScanned}
-              barCodeScannerSettings={{
-                barCodeTypes: ["qr"],
-              }}
-            />
+            {(hasCameraPermission || (permission && permission.granted)) ? (
+              <Camera
+                style={{ flex: 1 }}
+                // only attach handler when not already scanned to avoid repeated triggers
+                onBarCodeScanned={scanned ? undefined : handleBarCodeScanned}
+              />
+            ) : (
+              <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
+                <Text style={{ marginBottom: 12, textAlign: "center" }}>
+                  Camera permission is required to scan QR codes.
+                </Text>
+                <TouchableOpacity
+                  onPress={async () => {
+                    const ok = await requestScannerPermission();
+                    if (ok) {
+                      // reopen camera
+                      setTimeout(() => setScannerVisible(true), 300);
+                    }
+                  }}
+                  style={{ paddingHorizontal: 16, paddingVertical: 10, backgroundColor: "#007bff", borderRadius: 6 }}
+                >
+                  <Text style={{ color: "#fff" }}>Grant Permission</Text>
+                </TouchableOpacity>
+              </View>
+            )}
              <TouchableOpacity
               onPress={() => setScannerVisible(false)}
               style={{
@@ -1320,6 +1354,7 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     padding: 10,
     marginTop: 10,
+    color: "#000", // ensure typed text is visible in production APK
   },
   addButton: {
     marginTop: 10,
