@@ -12,9 +12,23 @@ import {
   Modal,
   Platform,
   Linking,
+  PermissionsAndroid,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Camera, useCameraPermissions } from "expo-camera";
+// require expo-camera safely because different bundlers/versions sometimes export a module object
+let CameraModule = null;
+try {
+  CameraModule = require("expo-camera");
+} catch (e) {
+  CameraModule = null;
+}
+
+// pick the Camera component (module may export Camera, default, or be namespaced)
+const CameraComp = CameraModule ? (CameraModule.Camera || CameraModule.default || CameraModule) : null;
+
+// useCameraPermissions hook fallback (if not present, provide a no-op pair)
+const useCameraPermissionsHook =
+  (CameraModule && CameraModule.useCameraPermissions) ? CameraModule.useCameraPermissions : () => [null, async () => ({ status: "undetermined" })];
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
 
@@ -64,12 +78,97 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   // Add state for QR scanner at the top with other states
   const [scannerVisible, setScannerVisible] = useState(false);
-  const [permission, requestPermission] = useCameraPermissions();
+  const [permission, requestPermission] = useCameraPermissionsHook();
 
   // keep explicit camera permission state (use Camera.requestCameraPermissionsAsync/getCameraPermissionsAsync)
   const [hasCameraPermission, setHasCameraPermission] = useState(false);
   // prevent multiple rapid scans from crashing app
   const [scanned, setScanned] = useState(false);
+
+  // simulator input so scanner flow can be tested in Metro/Expo Go when native camera component isn't renderable
+  const [simulateScanText, setSimulateScanText] = useState("");
+  
+  // Safe renderer for CameraView (prefers CameraView export). Uses onBarcodeScanned + barcodeScannerSettings.
+  function SafeCameraRenderer() {
+    const Cam = CameraModule && (CameraModule.CameraView || CameraModule.Camera || CameraModule.default || null);
+    // render real native camera when Cam is a function/class (renderable)
+    if (Cam && typeof Cam === "function") {
+      try {
+        return (
+          <Cam
+            style={{ flex: 1 }}
+            facing="back"
+            onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+            barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+          />
+        );
+      } catch (e) {
+        console.warn("SafeCameraRenderer: CameraView render failed", e);
+      }
+    }
+
+    // fallback simulator UI (non-crashing) for Expo Go / environments without renderable CameraView
+    return (
+      <View style={{ flex: 1, padding: 20, justifyContent: "center" }}>
+        <Text style={{ textAlign: "center", marginBottom: 12 }}>
+          Camera not available in this environment. Use the simulator below to test scanning,
+          or install a dev-client / standalone APK on device to test the real camera.
+        </Text>
+        <TextInput
+          placeholder="Paste scanned QR data (student email) here"
+          placeholderTextColor="#666"
+          value={simulateScanText}
+          onChangeText={setSimulateScanText}
+          style={{
+            borderWidth: 1,
+            borderColor: "#ddd",
+            borderRadius: 6,
+            padding: 10,
+            backgroundColor: "#fff",
+            color: "#000",
+            marginBottom: 10,
+          }}
+          autoCapitalize="none"
+          keyboardType="email-address"
+        />
+        <TouchableOpacity
+          onPress={() => {
+            if (!(simulateScanText || "").trim()) {
+              Alert.alert("Validation", "Enter the QR payload (student email) to simulate.");
+              return;
+            }
+            // pass same shape as expo-camera CameraView provides
+            handleBarCodeScanned({ type: "qr", data: simulateScanText.trim() });
+          }}
+          style={{ padding: 12, backgroundColor: "#007bff", borderRadius: 6, alignItems: "center" }}
+        >
+          <Text style={{ color: "#fff" }}>Simulate Scan</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // runtime Camera component (null until we detect a valid component)
+  const [CameraComponent, setCameraComponent] = useState(null);
+  useEffect(() => {
+    try {
+      // prefer named export Camera, then default, then module itself if it's a function
+      let comp = null;
+      if (CameraModule) {
+        if (typeof CameraModule.Camera === "function") comp = CameraModule.Camera;
+        else if (typeof CameraModule.default === "function") comp = CameraModule.default;
+        else if (typeof CameraModule === "function") comp = CameraModule;
+      }
+      if (!comp) {
+        // best-effort: if CameraModule.Camera exists but is an object, skip it (not a valid component)
+        console.warn("Camera component not found as a function export; CameraModule keys:", CameraModule ? Object.keys(CameraModule) : "no-module");
+      }
+      setCameraComponent(comp);
+    } catch (e) {
+      console.warn("detect Camera component failed", e);
+      setCameraComponent(null);
+    }
+  }, []);
 
   // open/close helpers for class chat
   function openClassChat(classId, ownerEmail) {
@@ -82,6 +181,40 @@ export default function TeacherDashboard({ user, onSignOut }) {
   }
 
   useEffect(() => {
+    // check current camera permission on mount (keeps modal logic accurate)
+    (async () => {
+      try {
+        const current = CameraModule && CameraModule.getCameraPermissionsAsync
+          ? await CameraModule.getCameraPermissionsAsync()
+          : { status: "undetermined", granted: false };
+        let granted = !!(current && (current.granted || current.status === "granted"));
+
+        // Android native fallback: sometimes expo-camera isn't available in Expo Go or dev-client.
+        // Use PermissionsAndroid.check to detect a previously-granted permission.
+        if (!granted && Platform.OS === "android") {
+          try {
+            const ok = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.CAMERA);
+            granted = granted || !!ok;
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        setHasCameraPermission(!!granted);
+      } catch (e) {
+        // ignore, will request later
+        console.warn("getCameraPermissionsAsync failed", e);
+      }
+    })();
+    // also re-check if CameraModule becomes available later (dev reload), update CameraComponent
+    try {
+      if (!CameraComponent && CameraModule) {
+        if (typeof CameraModule.Camera === "function") setCameraComponent(CameraModule.Camera);
+        else if (typeof CameraModule.default === "function") setCameraComponent(CameraModule.default);
+      }
+    } catch (e) {
+      // ignore
+    }
     // install lightweight global handler to auto sign-out on Metro/dev-server errors
     let prevHandler = null;
     try {
@@ -1020,27 +1153,42 @@ export default function TeacherDashboard({ user, onSignOut }) {
 
   async function requestScannerPermission() {
     try {
-      const res = await Camera.requestCameraPermissionsAsync();
-      const granted = !!(res && (res.granted || res.status === "granted"));
-      setHasCameraPermission(granted);
-      if (!granted) {
-        Alert.alert(
-          "Camera permission",
-          "Camera permission is required to scan QR codes. Open app settings to allow it.",
-          [
-            { text: "Open settings", onPress: () => Linking.openSettings() },
-            { text: "Cancel", style: "cancel" },
-          ]
-        );
-        return false;
+      let res = { status: "undetermined", granted: false };
+      let granted = false;
+
+      if (CameraModule && CameraModule.requestCameraPermissionsAsync) {
+        res = await CameraModule.requestCameraPermissionsAsync();
+        granted = !!(res && (res.granted || res.status === "granted"));
+      } else if (Platform.OS === "android") {
+        // fallback to native PermissionsAndroid request when expo-camera API not present
+        try {
+          const r = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
+          granted = r === PermissionsAndroid.RESULTS.GRANTED;
+        } catch (e) {
+          granted = false;
+        }
+      } else {
+        granted = false;
       }
-      return true;
-    } catch (e) {
-      console.warn("requestScannerPermission", e);
-      Alert.alert("Permission error", "Could not request camera permission. Open app settings to enable it.");
-      return false;
-    }
-  }
+       setHasCameraPermission(granted);
+       if (!granted) {
+         Alert.alert(
+           "Camera permission",
+           "Camera permission is required to scan QR codes. Open app settings to allow it.",
+           [
+             { text: "Open settings", onPress: () => Linking.openSettings() },
+             { text: "Cancel", style: "cancel" },
+           ]
+         );
+         return false;
+       }
+       return true;
+     } catch (e) {
+       console.warn("requestScannerPermission", e);
+       Alert.alert("Permission error", "Could not request camera permission. Open app settings to enable it.");
+       return false;
+     }
+   }
 
    async function openQrScanner() {
      const ok = await requestScannerPermission();
@@ -1178,16 +1326,12 @@ export default function TeacherDashboard({ user, onSignOut }) {
         <Modal visible={scannerVisible} transparent={false} onRequestClose={() => setScannerVisible(false)}>
           <View style={{ flex: 1 }}>
             {(hasCameraPermission || (permission && permission.granted)) ? (
-              <Camera
-                style={{ flex: 1 }}
-                // only attach handler when not already scanned to avoid repeated triggers
-                onBarCodeScanned={scanned ? undefined : handleBarCodeScanned}
-              />
+              <SafeCameraRenderer />
             ) : (
-              <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
-                <Text style={{ marginBottom: 12, textAlign: "center" }}>
-                  Camera permission is required to scan QR codes.
-                </Text>
+               <View style={{ flex: 1, justifyContent: "center", alignItems: "center", padding: 20 }}>
+                 <Text style={{ marginBottom: 12, textAlign: "center" }}>
+                   Camera permission is required to scan QR codes.
+                 </Text>
                 <TouchableOpacity
                   onPress={async () => {
                     const ok = await requestScannerPermission();
