@@ -12,8 +12,11 @@ import {
   Animated,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+// added: firebase register helper (non-destructive, best-effort)
+import { registerWithEmailPassword, saveUserProfile } from '../src/firebase/firebaseService';
 
 const USERS_KEY = 'users';
+const AUTH_KEY = 'userToken';
 
 export default function Register({ onRegistered, onCancel }) {
   const [firstName, setFirstName] = useState('');
@@ -62,6 +65,24 @@ export default function Register({ onRegistered, onCancel }) {
 
     setLoading(true);
     try {
+      // attempt Firebase registration and use returned uid for profile document
+      let uid = null;
+      try {
+        const fbUser = await registerWithEmailPassword(em, pw);
+        uid = fbUser?.uid || null;
+      } catch (fbErr) {
+        console.warn('Firebase register failed (continuing with local save):', fbErr?.message || fbErr);
+      }
+
+      // save profile to Firestore using uid when available; fallback to email-based id if your service uses that
+      try {
+        const profile = { firstName: f, lastName: l, role, gender, email: em, createdAt: new Date().toISOString() };
+        // saveUserProfile should accept an id (uid) or email-sanitized id depending on your firebaseService implementation
+        await saveUserProfile(uid || em, profile);
+      } catch (saveErr) {
+        console.warn('saveUserProfile failed (continuing):', saveErr);
+      }
+
       const raw = await AsyncStorage.getItem(USERS_KEY);
       const users = raw ? JSON.parse(raw) : {};
 
@@ -75,21 +96,32 @@ export default function Register({ onRegistered, onCancel }) {
       users[em] = {
         email: em,
         password: pw,
-        role: role, // selected role
+        role: role, // selected role (Student | Teacher)
         firstName: f,
         lastName: l,
         gender: gender, // only 'Male' or 'Female'
         // classes array will be added later when enrolled
         classes: [],
+        createdAt: new Date().toISOString(),
       };
 
       await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+
+      // persist auth token locally so Login/flow can detect and navigate
+      try {
+        await AsyncStorage.setItem(AUTH_KEY, em);
+      } catch (tokenErr) {
+        console.warn('Failed to persist auth token locally', tokenErr);
+      }
+
       setLoading(false);
       Alert.alert('Registered', 'Account created');
 
+      // keep existing callback contract
       onRegistered && onRegistered(users[em]);
     } catch (e) {
       setLoading(false);
+      console.warn('Local register failed', e);
       Alert.alert('Error', 'Unable to register');
     }
   }

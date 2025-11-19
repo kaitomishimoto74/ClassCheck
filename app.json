@@ -21,7 +21,8 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.jovan_misiona.ClassCheck"
+      "package": "com.jovan_misiona.ClassCheck",
+      "permissions": ["CAMERA", "INTERNET"]
     },
     "web": {
       "favicon": "./assets/favicon.png"

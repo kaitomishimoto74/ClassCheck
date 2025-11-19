@@ -6,12 +6,13 @@ import {
   TextInput,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Image,
+  Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { registerWithEmailPassword, loginWithEmailPassword, getUserProfile } from '../src/firebase/firebaseService';
 import Register from './Register';
 import StudentDashboard from '../Dashboard/StudentDashboard';
 import TeacherDashboard from '../Dashboard/TeacherDashboard';
@@ -44,6 +45,7 @@ export default function Login() {
     })();
   }, []);
 
+  // SIGN IN: try Firebase auth first, then fallback to local AsyncStorage
   const signIn = async () => {
     if (!email || !password) {
       Alert.alert('Validation', 'Please enter email and password');
@@ -51,6 +53,61 @@ export default function Login() {
     }
     setLoading(true);
     try {
+      // Try Firebase login first (best-effort)
+      try {
+        const fbUser = await loginWithEmailPassword((email || '').trim(), password);
+        const emailKey = (email || '').trim().toLowerCase();
+
+        // try to fetch profile from Firestore using uid (preferred) then fallback to email key
+        let profile = null;
+        try {
+          profile = await getUserProfile(fbUser.uid || emailKey);
+        } catch (e) {
+          console.warn('getUserProfile failed', e);
+        }
+
+        // merge profile into local users store
+        const usersRaw = await AsyncStorage.getItem(USERS_KEY);
+        const users = usersRaw ? JSON.parse(usersRaw) : {};
+        const existing = users[emailKey] || {};
+        const firstName = profile?.firstName ?? existing.firstName ?? '';
+        const lastName = profile?.lastName ?? existing.lastName ?? '';
+        const roleVal = profile?.role ?? existing.role ?? 'Student';
+        const genderVal = profile?.gender ?? existing.gender ?? null;
+        const classesVal = Array.isArray(profile?.classes) ? profile.classes : (existing.classes || []);
+
+        users[emailKey] = {
+          ...existing,
+          email: emailKey,
+          firstName,
+          lastName,
+          name: (firstName || lastName) ? `${firstName} ${lastName}`.trim() : (existing.name || ''),
+          role: roleVal,
+          gender: genderVal,
+          classes: classesVal,
+          syncedAt: new Date().toISOString(),
+        };
+
+        await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+        await AsyncStorage.setItem(AUTH_KEY, emailKey);
+
+        setUser({
+          email: emailKey,
+          name: users[emailKey].name,
+          role: users[emailKey].role,
+          firstName: users[emailKey].firstName,
+          lastName: users[emailKey].lastName,
+          gender: users[emailKey].gender,
+          classes: users[emailKey].classes,
+        });
+
+        setLoading(false);
+        return;
+      } catch (fbErr) {
+        console.warn('Firebase login failed, falling back to local', fbErr);
+      }
+
+      // Fallback: local AsyncStorage auth (unchanged)
       const raw = await AsyncStorage.getItem(USERS_KEY);
       const users = raw ? JSON.parse(raw) : {};
       const account = users[email];
@@ -66,7 +123,6 @@ export default function Login() {
       }
 
       await AsyncStorage.setItem(AUTH_KEY, email);
-      // pass full account object (normalized by Register)
       setUser({
         email,
         name: account.name || `${account.firstName || ''} ${account.lastName || ''}`.trim(),
