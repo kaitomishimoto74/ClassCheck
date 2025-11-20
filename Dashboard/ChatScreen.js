@@ -17,6 +17,7 @@ import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
 import { Camera, useCameraPermissions } from "expo-camera";
+import { subscribeToClassMessages, sendClassMessage } from "../src/firebase/firebaseService";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -40,6 +41,7 @@ export default function ChatScreen(props) {
   const [recipient, setRecipient] = useState(null);
   const [search, setSearch] = useState("");
   const flatRef = useRef(null);
+  const messagesUnsubRef = useRef(null);
 
   useEffect(() => {
     loadInitial();
@@ -140,19 +142,13 @@ export default function ChatScreen(props) {
   }
 
   async function handleSend() {
-    const body = (text || "").trim();
-    if (!body || !recipient) return;
-    const msg = {
-      id: genId(),
-      senderEmail: currentUser.email,
-      senderName: getSenderName(currentUser.email),
-      recipientEmail: recipient || null,
-      text: body,
-      date: new Date().toISOString(),
-      attachment: null,
-    };
+    if (!text || !text.trim()) return;
+    const payload = { classId, text: text.trim(), from: currentUser?.email || currentUser?.uid || "unknown", createdAt: Date.now() };
+    setMessages((m) => [...m, payload]);
     setText("");
-    await persistMessage(msg);
+    if (typeof sendClassMessage === "function") {
+      try { await sendClassMessage(classId, payload); } catch (e) { console.warn("sendClassMessage failed", e); }
+    }
   }
 
   async function handleAttach() {
@@ -260,6 +256,22 @@ export default function ChatScreen(props) {
   useEffect(() => {
     reloadUsersMap();
   }, []);
+
+  useEffect(() => {
+    // subscribe to remote messages (best-effort)
+    try {
+      if (typeof subscribeToClassMessages === "function" && classId) {
+        messagesUnsubRef.current = subscribeToClassMessages(classId, (msgs) => {
+          setMessages(Array.isArray(msgs) ? msgs : []);
+        }, (err) => console.warn("subscribeToClassMessages error", err));
+      }
+    } catch (e) {
+      console.warn("chat subscribe failed", e);
+    }
+    return () => {
+      try { if (messagesUnsubRef && messagesUnsubRef.current) { messagesUnsubRef.current(); messagesUnsubRef.current = null; } } catch (_) {}
+    };
+  }, [classId]);
 
   function renderItem({ item }) {
     const mine = item.senderEmail === currentUser.email;

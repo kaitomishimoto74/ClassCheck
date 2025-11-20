@@ -15,6 +15,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
+import { uploadProfileImage, saveUserProfile } from "../src/firebase/firebaseService";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -92,39 +93,32 @@ export default function StudentDashboard({ user, onSignOut }) {
   }
 
   async function saveProfileChanges() {
-    if (profilePassword && profilePasswordConfirm && profilePassword !== profilePasswordConfirm) {
-      Alert.alert("Validation", "Passwords do not match");
-      return;
-    }
-
     try {
-      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-      const users = rawUsers ? JSON.parse(rawUsers) : {};
-
-      const existing = users[email] || {};
-      const updated = {
-        ...existing,
-        firstName: (profileFirstName || "").trim(),
-        lastName: (profileLastName || "").trim(),
-        profileImage: profileImage || existing.profileImage || null,
-      };
-
-      if (profilePassword) updated.password = profilePassword;
-
-      users[email] = updated;
+      const raw = await AsyncStorage.getItem(USERS_KEY);
+      const users = raw ? JSON.parse(raw) : {};
+      const existing = users[user.email] || {};
+      const updated = { ...existing, firstName: profileFirstName, lastName: profileLastName, profileImage: profileImage || existing.profileImage || null };
+      users[user.email] = updated;
       await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-
       setUsersMap(users);
-      setProfileFirstName(updated.firstName || "");
-      setProfileLastName(updated.lastName || "");
-      setProfileImage(updated.profileImage || null);
-
-      setProfilePassword("");
-      setProfilePasswordConfirm("");
-
-      Alert.alert("Success", "Profile updated");
+      // upload image first if data-uri
+      if (updated.profileImage && typeof updated.profileImage === "string" && updated.profileImage.startsWith("data:") && typeof uploadProfileImage === "function") {
+        try {
+          const url = await uploadProfileImage(user.uid || user.email, updated.profileImage);
+          updated.profileImage = url || updated.profileImage;
+          users[user.email] = updated;
+          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+          setUsersMap(users);
+        } catch (e) {
+          console.warn("uploadProfileImage failed in StudentDashboard", e);
+        }
+      }
+      if (typeof saveUserProfile === "function") {
+        try { await saveUserProfile(user.uid || user.email, updated); } catch (e) { console.warn("saveUserProfile failed in StudentDashboard", e); }
+      }
+      Alert.alert("Saved", "Profile saved");
     } catch (e) {
-      console.warn("saveProfileChanges error", e);
+      console.warn("saveProfile error", e);
       Alert.alert("Error", "Could not save profile");
     }
   }

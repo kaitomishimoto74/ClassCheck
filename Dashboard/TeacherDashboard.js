@@ -15,6 +15,17 @@ import {
   PermissionsAndroid,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+// added: optional firestore helpers (best-effort — will not throw if missing)
+import {
+  subscribeToTeacherClasses,
+  createOrUpdateClass,
+  deleteClassFirestore,
+  saveUserProfile,
+  addStudentToClass,
+  markStudentPresent,
+  markAttendance,
+  uploadProfileImage,
+} from "../src/firebase/firebaseService";
 // require expo-camera safely because different bundlers/versions sometimes export a module object
 let CameraModule = null;
 try {
@@ -31,6 +42,8 @@ const useCameraPermissionsHook =
   (CameraModule && CameraModule.useCameraPermissions) ? CameraModule.useCameraPermissions : () => [null, async () => ({ status: "undetermined" })];
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
+import { updateDoc, setDoc, deleteDoc, collection, query, where, addDoc, getDocs, arrayUnion, arrayRemove, getDoc as getDocFirestore, getFirestore, doc } from "firebase/firestore";
+import { getStorage, ref as storageRef, uploadString, getDownloadURL } from "firebase/storage";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
@@ -47,7 +60,9 @@ export default function TeacherDashboard({ user, onSignOut }) {
   // double-press delete state
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const pendingTimerRef = useRef(null);
-
+  // subscription ref for Firestore listener (fixes ReferenceError)
+  const classesUnsubRef = useRef(null);
+  
   // class editor fields
   const [subject, setSubject] = useState("");
   const [department, setDepartment] = useState("");
@@ -238,15 +253,42 @@ export default function TeacherDashboard({ user, onSignOut }) {
     } catch (e) {
       safeWarn("install global handler failed", e);
     }
-
+  
     // existing mount behaviour
     if (!user) {
       onSignOut && onSignOut();
     } else {
       setView("manage");
       loadAllClasses();
+      // try to subscribe to remote classes (best-effort)
+      try {
+        if (typeof subscribeToTeacherClasses === "function" && user?.email) {
+          // store unsubscribe so cleanup can call it
+          try {
+            classesUnsubRef.current = subscribeToTeacherClasses(
+              user.email,
+              (remoteClasses) => {
+                setClassesList(Array.isArray(remoteClasses) ? remoteClasses : []);
+                // persist locally as cache too (non-blocking)
+                AsyncStorage.getItem(CLASSES_KEY)
+                  .then((raw) => {
+                    const all = raw ? JSON.parse(raw) : {};
+                    all[user.email] = Array.isArray(remoteClasses) ? remoteClasses : [];
+                    return AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(all));
+                  })
+                  .catch(() => {});
+              },
+              (err) => console.warn("subscribeToTeacherClasses error", err)
+            );
+          } catch (e) {
+            console.warn("subscribeToTeacherClasses init failed", e);
+          }
+        }
+      } catch (e) {
+        console.warn("subscribeToTeacherClasses init outer failed", e);
+      }
     }
-
+  
     return () => {
       // restore previous global handler
       try {
@@ -256,6 +298,15 @@ export default function TeacherDashboard({ user, onSignOut }) {
       } catch (e) {
         // ignore
       }
+     // cleanup classes subscription if set
+     try {
+       if (classesUnsubRef && classesUnsubRef.current) {
+         try { classesUnsubRef.current(); } catch(_) {}
+         classesUnsubRef.current = null;
+       }
+     } catch (e) {
+       // ignore
+     }
     };
   }, []);
 
@@ -266,18 +317,76 @@ export default function TeacherDashboard({ user, onSignOut }) {
     return [];
   }
 
+  // build sorted students array for UI (uses usersMap when available)
+  function buildSortedStudentsArray(students) {
+    const arr = (students || [])
+      .map((s) => {
+        if (!s) return null;
+        if (typeof s === "string") {
+          const email = s;
+          const u = usersMap[email] || {};
+          const first = u.firstName || (u.name ? u.name.split(" ")[0] : "");
+          const last = u.lastName || "";
+          const display = `${first} ${last}`.trim() || email;
+          return { email, display };
+        } else {
+          const email = s.email || (s.uid || "");
+          const display =
+            s.display ||
+            `${s.firstName || s.name || ""} ${s.lastName || ""}`.trim() ||
+            email;
+          return { email, display };
+        }
+      })
+      .filter(Boolean);
+    arr.sort((a, b) => (a.display || "").toString().localeCompare((b.display || "").toString()));
+    return arr;
+  }
+
+  // fallback uploader using uploadString (avoids Blob/ArrayBuffer issues in RN environments)
+  async function uploadProfileImageFallback(uidOrEmail, dataUrl) {
+    try {
+      if (!dataUrl || typeof dataUrl !== "string") throw new Error("invalid dataUrl");
+      const storage = getStorage();
+      const path = `profiles/${String(uidOrEmail).replace(/[@/\\]/g, "_")}/avatar.jpg`;
+      const ref = storageRef(storage, path);
+      // uploadString supports full data URL with 'data_url' option
+      await uploadString(ref, dataUrl, "data_url");
+      const url = await getDownloadURL(ref);
+      return url;
+    } catch (e) {
+      console.warn("uploadProfileImageFallback failed", e);
+      throw e;
+    }
+  }
+
   async function loadAllClasses() {
     setLoading(true);
     try {
-      const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      const arr = normalizeEntry(all[user.email]);
+      // Query Firestore classes owned by current teacher
+      const db = getFirestore();
+      const q = query(collection(db, "classes"), where("owner", "==", user?.email));
+      const snap = await getDocs(q);
+      const arr = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       setClassesList(arr);
-      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-      const users = rawUsers ? JSON.parse(rawUsers) : {};
+
+      // Best-effort: load user profiles for enrolled students
+      const users = {};
+      const emails = new Set();
+      arr.forEach((c) => (c.students || []).forEach((s) => {
+        const em = typeof s === "string" ? s : s?.email;
+        if (em) emails.add(em);
+      }));
+      for (const em of Array.from(emails)) {
+        try {
+          const ud = await getDocFirestore(doc(db, "users", em));
+          if (ud && ud.exists()) users[em] = ud.data();
+        } catch (e) {
+          // ignore per-user failures
+        }
+      }
       setUsersMap(users);
     } catch (e) {
-      // if dev-server error -> sign out, otherwise silent log
       if (isDevServerError(e)) {
         safeWarn("Dev-server error during loadAllClasses, signing out", e);
         onSignOut && onSignOut();
@@ -288,18 +397,39 @@ export default function TeacherDashboard({ user, onSignOut }) {
       setLoading(false);
     }
   }
-
+  
   async function persistClasses(newList = classesList) {
     try {
-      const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      if (!newList || newList.length === 0) {
-        delete all[user.email];
-      } else {
-        all[user.email] = newList;
+      // Update local state first
+      setClassesList(Array.isArray(newList) ? newList : []);
+
+      // Best-effort: upsert each class to Firestore so other devices sync
+      if (Array.isArray(newList) && newList.length) {
+        await Promise.all(
+          newList.map(async (cls) => {
+            try {
+              if (typeof createOrUpdateClass === "function") {
+                await createOrUpdateClass({ ...cls, owner: user.email });
+              } else {
+                // if helper missing, attempt direct write (doc id must be present)
+                const db = getFirestore();
+                try {
+                  await updateDoc(doc(db, "classes", cls.id), { ...cls, owner: user.email });
+                } catch (_) {
+                  // if update fails (doc missing), try addDoc (will create new id)
+                  try {
+                    await addDoc(collection(db, "classes"), { ...cls, owner: user.email });
+                  } catch (err) {
+                    console.warn("persistClasses direct firestore write failed", err);
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn("createOrUpdateClass failed for", cls.id, e);
+            }
+          })
+        );
       }
-      await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(all));
-      setClassesList(newList);
     } catch (e) {
       if (isDevServerError(e)) {
         safeWarn("Dev-server error during persistClasses, signing out", e);
@@ -309,7 +439,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
       safeWarn("persistClasses error", e);
     }
   }
-
+  
   // Create a new class and save to Manage
   async function handleSaveClass() {
     const meta = {
@@ -330,6 +460,16 @@ export default function TeacherDashboard({ user, onSignOut }) {
     };
     const updated = [...classesList, newClass];
     await persistClasses(updated);
+
+    // best-effort: create/update in Firestore
+    if (typeof createOrUpdateClass === "function") {
+      try {
+        await createOrUpdateClass({ ...newClass, owner: user.email });
+      } catch (e) {
+        console.warn("createOrUpdateClass failed on saveClass", e);
+      }
+    }
+
     // reset inputs
     setSubject("");
     setDepartment("");
@@ -344,18 +484,30 @@ export default function TeacherDashboard({ user, onSignOut }) {
     if (Platform.OS === "web" && typeof window !== "undefined" && typeof window.confirm === "function") {
       return window.confirm(`${title}\n\n${message}`);
     }
-    // no modal on native by request — proceed and log
-    safeWarn("confirmDialog: skipping native confirmation:", title, message);
-    return true;
+    // show native Alert on mobile and return a Promise<boolean>
+    return new Promise((resolve) => {
+      try {
+        Alert.alert(
+          title,
+          message,
+          [
+            { text: "Cancel", onPress: () => resolve(false), style: "cancel" },
+            { text: "OK", onPress: () => resolve(true) },
+          ],
+          { cancelable: true }
+        );
+      } catch (e) {
+        safeWarn("confirmDialog alert failed, defaulting to true", e);
+        resolve(true);
+      }
+    });
   }
 
   // remove a class the current account manages (no Alert popups)
   async function removeClass(classId) {
     try {
-      const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      const arr = normalizeEntry(all[user.email]);
-      const cls = arr.find((c) => c.id === classId);
+      // find class in current UI state
+      const cls = classesList.find((c) => c.id === classId);
       if (!cls) {
         await loadAllClasses();
         return;
@@ -367,28 +519,83 @@ export default function TeacherDashboard({ user, onSignOut }) {
       );
       if (!ok) return;
 
-      const remaining = arr.filter((c) => c.id !== classId);
-      await persistClasses(remaining);
+      // update local UI immediately to avoid re-creating the class on later sync
+      const remaining = (classesList || []).filter((c) => c.id !== classId);
+      setClassesList(remaining);
 
-      if (Array.isArray(cls.students) && cls.students.length) {
-        const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-        const users = rawUsers ? JSON.parse(rawUsers) : {};
-        let changed = false;
-        for (const s of cls.students) {
-          const em = typeof s === "string" ? s : s?.email;
-          if (!em) continue;
-          const u = users[em];
-          if (u && Array.isArray(u.classes)) {
-            const filtered = u.classes.filter((cc) => cc.id !== classId);
-            if (filtered.length !== u.classes.length) {
-              users[em] = { ...u, classes: filtered };
-              changed = true;
+      // delete remote doc via helper or direct call
+      try {
+        if (typeof deleteClassFirestore === "function") {
+          await deleteClassFirestore(classId);
+        } else {
+          const db = getFirestore();
+          await deleteDoc(doc(db, "classes", classId));
+        }
+      } catch (e) {
+        console.warn("class delete failed", e);
+      }
+
+      // ALSO remove any references to this class in the teachers collection (best-effort)
+      try {
+        const db = getFirestore();
+        // read all teacher docs and remove any reference to the class id.
+        // array-contains failed previously because teacher.classes may store objects, not plain ids.
+        const tSnap = await getDocs(collection(db, "teachers"));
+        await Promise.all(
+          tSnap.docs.map(async (td) => {
+            try {
+              const tdata = td.data() || {};
+              const clsArr = Array.isArray(tdata.classes) ? tdata.classes : [];
+              const filtered = clsArr.filter((c) => {
+                if (!c) return false;
+                if (typeof c === "string") return String(c) !== String(classId);
+                if (typeof c === "object") {
+                  // common shapes: { id: "<id>" } or { classId: "<id>" }
+                  return String(c.id || c.classId || c) !== String(classId);
+                }
+                return String(c) !== String(classId);
+              });
+              if (filtered.length !== clsArr.length) {
+                await updateDoc(doc(db, "teachers", td.id), { classes: filtered });
+              }
+            } catch (err) {
+              // ignore per-teacher failure
             }
-          }
+          })
+        );
+      } catch (e) {
+        console.warn("teacher cleanup failed", e);
+      }
+
+      // remove class refs from each student's user doc (best-effort)
+      try {
+        const db = getFirestore();
+        if (Array.isArray(cls.students)) {
+          await Promise.all(
+            cls.students.map(async (s) => {
+              const em = typeof s === "string" ? s : s?.email;
+              if (!em) return;
+              try {
+                const userRef = doc(db, "users", em);
+                const ud = await getDocFirestore(userRef);
+                if (ud && ud.exists()) {
+                  const u = ud.data();
+                  const filtered = (u.classes || []).filter((cc) => String(cc.id) !== String(classId));
+                  if (filtered.length !== (u.classes || []).length) {
+                    await updateDoc(userRef, { classes: filtered });
+                    if (typeof saveUserProfile === "function") {
+                      try { await saveUserProfile(u.uid || em, { ...u, classes: filtered }); } catch (_) {}
+                    }
+                  }
+                }
+              } catch (e) {
+                // ignore per-user failures
+              }
+            })
+          );
         }
-        if (changed) {
-          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-        }
+      } catch (e) {
+        // ignore
       }
 
       await loadAllClasses();
@@ -400,10 +607,10 @@ export default function TeacherDashboard({ user, onSignOut }) {
         onSignOut && onSignOut();
         return;
       }
-      safeWarn("removeClass storage read error", e);
+      safeWarn("removeClass error", e);
     }
-  }
-
+   }
+  
   // remove student from open class and from user's classes (no Alert popups)
   async function removeStudentFromOpenClass(email) {
     const cls = classesList.find((c) => c.id === openClassId);
@@ -413,37 +620,50 @@ export default function TeacherDashboard({ user, onSignOut }) {
     if (!ok) return;
 
     try {
-      const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      const arr = normalizeEntry(all[user.email]);
-      const target = arr.find((c) => c.id === cls.id);
-      if (!target) {
-        await loadAllClasses();
-        return;
+      const db = getFirestore();
+      // remove student from class.students using arrayRemove for atomic update
+      try {
+        if (typeof createOrUpdateClass === "function") {
+          // prefer helper: fetch updated class client-side then write
+          const updatedStudents = (cls.students || []).filter((s) => {
+            const em = typeof s === "string" ? s : s?.email;
+            return em !== email;
+          });
+          await createOrUpdateClass({ ...cls, students: updatedStudents, owner: user.email });
+        } else {
+          await updateDoc(doc(db, "classes", cls.id), { students: arrayRemove(email) });
+        }
+      } catch (e) {
+        console.warn("remove-student remote update failed", e);
+        // fallback: full write via helper
+        if (typeof createOrUpdateClass === "function") {
+          try {
+            await createOrUpdateClass({ ...cls, owner: user.email });
+          } catch (err) { console.warn(err); }
+        }
       }
 
-      const updatedStudents = (target.students || []).filter((s) => {
-        const em = typeof s === "string" ? s : s?.email;
-        return em !== email;
-      });
-      const updatedClass = { ...target, students: updatedStudents };
-      const updatedArr = arr.map((c) => (c.id === updatedClass.id ? updatedClass : c));
-      await persistClasses(updatedArr);
-
-      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-      const users = rawUsers ? JSON.parse(rawUsers) : {};
-      const u = users[email];
-      if (u && Array.isArray(u.classes)) {
-        const filtered = u.classes.filter((c) => c.id !== cls.id);
-        if (filtered.length !== u.classes.length) {
-          users[email] = { ...u, classes: filtered };
-          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+      // remove class reference from student's user doc (best-effort)
+      try {
+        const userRef = doc(db, "users", email);
+        const ud = await getDocFirestore(userRef);
+        if (ud && ud.exists()) {
+          const u = ud.data();
+          const filtered = (u.classes || []).filter((c) => String(c.id) !== String(cls.id));
+          if (filtered.length !== (u.classes || []).length) {
+            await updateDoc(userRef, { classes: filtered });
+            if (typeof saveUserProfile === "function") {
+              try { await saveUserProfile(u.uid || email, { ...u, classes: filtered }); } catch (_) {}
+            }
+          }
         }
+      } catch (e) {
+        // ignore per-user failure
       }
 
       setNewStudentEmail("");
       await loadAllClasses();
-      const exists = updatedArr.find((c) => c.id === cls.id);
+      const exists = (classesList || []).find((c) => c.id === cls.id);
       if (!exists) {
         setOpenClassId(null);
         setView("manage");
@@ -458,11 +678,13 @@ export default function TeacherDashboard({ user, onSignOut }) {
       }
       safeWarn("removeStudentFromOpenClass error", e);
     }
-  }
-
+   }
+  
   function openClass(classId) {
     setOpenClassId(classId);
     setView("class"); // show class view (renderClass handles both create + open)
+    // ensure the add-student field is empty and not pre-filled by OS/autofill
+    setNewStudentEmail("");
   }
 
   // double-press confirm delete for a class
@@ -510,27 +732,37 @@ export default function TeacherDashboard({ user, onSignOut }) {
     }
     
     try {
-      // read latest classes
-      const raw = await AsyncStorage.getItem(CLASSES_KEY);
-      const all = raw ? JSON.parse(raw) : {};
-      const arr = normalizeEntry(all[user.email]);
-      const idx = arr.findIndex((c) => c.id === openClassId);
-      if (idx === -1) {
+      const db = getFirestore();
+  
+      // fetch latest class doc
+      const classRef = doc(db, "classes", openClassId);
+      const classSnap = await getDocFirestore(classRef);
+      if (!classSnap || !classSnap.exists()) {
         Alert.alert("Error", "Open class not found");
         await loadAllClasses();
         return;
       }
-
-      // ensure student is registered
-      const rawUsersCheck = await AsyncStorage.getItem(USERS_KEY);
-      const usersCheck = rawUsersCheck ? JSON.parse(rawUsersCheck) : {};
-      const registered = usersCheck[email];
-      if (!registered || (registered.role && registered.role.toLowerCase() !== "student")) {
-        Alert.alert("Not registered", "Student email not found or not registered as a student");
+      const cls = { id: classSnap.id, ...classSnap.data() };
+  
+      // ensure student is registered in users collection
+      try {
+        const userRef = doc(db, "users", email);
+        const userSnap = await getDocFirestore(userRef);
+        if (!userSnap || !userSnap.exists()) {
+          Alert.alert("Not registered", "Student email not found or not registered as a student");
+          return;
+        }
+        const registered = userSnap.data();
+        if (registered && registered.role && String(registered.role).toLowerCase() !== "student") {
+          Alert.alert("Not registered", "Student email not found or not registered as a student");
+          return;
+        }
+      } catch (e) {
+        console.warn("check user profile failed", e);
+        Alert.alert("Not registered", "Student email not found");
         return;
       }
-
-      const cls = arr[idx] || { id: openClassId, meta: {}, students: [], attendance: {} };
+  
       // avoid duplicates
       const exists = (cls.students || []).some((s) => (typeof s === "string" ? s === email : s?.email === email));
       if (exists) {
@@ -538,27 +770,45 @@ export default function TeacherDashboard({ user, onSignOut }) {
         setNewStudentEmail("");
         return;
       }
-
-      // append as string (matches renderClass)
-      const updatedStudents = [...(cls.students || []), email];
-      const updatedClass = { ...cls, students: updatedStudents };
-      const updatedArr = arr.map((c) => (c.id === updatedClass.id ? updatedClass : c));
-      await persistClasses(updatedArr);
-
-      // update registered student's user record with this class reference (only if needed)
-      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-      const users = rawUsers ? JSON.parse(rawUsers) : {};
-      const u = users[email];
-      if (u && Array.isArray(u.classes)) {
-        const classMetaWithId = { id: updatedClass.id, instructor: user.email, ...updatedClass.meta };
-        const hasClass = u.classes.find((c) => c.id === updatedClass.id);
-        if (!hasClass) {
-          users[email] = { ...u, classes: [...u.classes, classMetaWithId] };
-          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-          // updated user record
+  
+      // Remote update: prefer helper, otherwise use atomic arrayUnion
+      try {
+        if (typeof addStudentToClass === "function") {
+          await addStudentToClass(cls.id, email);
+        } else {
+          await updateDoc(classRef, { students: arrayUnion(email) });
+        }
+      } catch (e) {
+        console.warn("addStudent remote update failed", e);
+        // fallback: full write via helper
+        if (typeof createOrUpdateClass === "function") {
+          try {
+            await createOrUpdateClass({ ...cls, students: [...(cls.students || []), email], owner: user.email });
+          } catch (err) { console.warn(err); }
         }
       }
-
+  
+      // Add class meta to student user doc classes[] entry (best-effort)
+      try {
+        const userRef = doc(db, "users", email);
+        const userSnap = await getDocFirestore(userRef);
+        if (userSnap && userSnap.exists()) {
+          const u = userSnap.data();
+          const meta = { id: cls.id, instructor: user.email, ...(cls.meta || {}) };
+          const existing = (u.classes || []).find((c) => String(c.id) === String(cls.id));
+          if (!existing) {
+            // write full filtered array (arrayUnion of object may not dedupe)
+            const newClasses = [...(u.classes || []), meta];
+            await updateDoc(userRef, { classes: newClasses });
+            if (typeof saveUserProfile === "function") {
+              try { await saveUserProfile(u.uid || email, { ...u, classes: newClasses }); } catch (_) {}
+            }
+          }
+        }
+      } catch (e) {
+        // ignore per-user failure
+      }
+  
       setNewStudentEmail("");
       await loadAllClasses();
       // success
@@ -570,587 +820,8 @@ export default function TeacherDashboard({ user, onSignOut }) {
       }
       safeWarn("handleAddStudent error", e);
     }
-  }
-
-  function formatDateKey(d = new Date()) {
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
-  }
-  
-  // Open attendance view for a class for a given date (default today)
-  function openAttendance(classId, dateKey = null) {
-    const key = dateKey || formatDateKey();
-    setAttendanceDate(key);
-    setAttendanceClassId(classId);
-    // prepare attendance state from classesList
-    const cls = classesList.find((c) => c.id === classId) || { students: [], attendance: {} };
-    const dayRec = (cls.attendance && cls.attendance[key]) || {};
-    const map = {};
-    (cls.students || []).forEach((s) => {
-      const em = typeof s === "string" ? s : s?.email;
-      map[em] = !!dayRec[em];
-    });
-    setAttendanceState(map);
-    setView("attendance");
-  }
-
-  function toggleAttendance(email) {
-    setAttendanceState((prev) => ({ ...prev, [email]: !prev[email] }));
-  }
-
-  async function saveAttendance() {
-    if (!attendanceClassId) return;
-    try {
-      // update classesList in-memory and persist
-      const updated = classesList.map((c) => {
-        if (c.id !== attendanceClassId) return c;
-
-        // update attendance map for the date
-        const att = { ...(c.attendance || {}) };
-        att[attendanceDate] = { ...(att[attendanceDate] || {}) };
-        Object.keys(attendanceState).forEach((em) => {
-          att[attendanceDate][em] = !!attendanceState[em];
-        });
-
-        // build attendance summary for history
-        const present = Object.keys(attendanceState).filter((em) => attendanceState[em]);
-        const absent = Object.keys(attendanceState).filter((em) => !attendanceState[em]);
-
-        // maintain attendanceHistory array (most-recent-first), replace entry if same date exists
-        const history = Array.isArray(c.attendanceHistory) ? [...c.attendanceHistory] : [];
-        const filtered = history.filter((h) => h.date !== attendanceDate);
-        const newEntry = { date: attendanceDate, present, absent };
-        const newHistory = [newEntry, ...filtered].slice(0, 365); // keep at most 1 year of records by default
-
-        return { ...c, attendance: att, attendanceHistory: newHistory };
-      });
-      await persistClasses(updated);
-
-      // reload to refresh usersMap & classesList
-      await loadAllClasses();
-
-      // prepare for next attendance session:
-      //  - default to next day
-      //  - reset attendanceState to all absent (false)
-      const nextDate = formatDateKey(new Date(Date.now() + 24 * 60 * 60 * 1000));
-      const updatedClass = updated.find((c) => c.id === attendanceClassId) || {};
-      const students = Array.isArray(updatedClass.students) ? updatedClass.students : [];
-      const defaultMap = {};
-      students.forEach((s) => {
-        const em = typeof s === "string" ? s : s?.email;
-        if (em) defaultMap[em] = false; // absent by default
-      });
-      setAttendanceClassId(attendanceClassId);
-      setAttendanceDate(nextDate);
-      setAttendanceState(defaultMap);
-      setView("attendance");
-    } catch (e) {
-      safeWarn("saveAttendance error", e);
-    }
-  }
-
-  // open attendance history view for a class
-  function openAttendanceHistory(classId) {
-    setAttendanceClassId(classId);
-    setView("attendanceHistory");
-  }
-  
-  function renderAttendanceHistory() {
-    const cls = classesList.find((c) => c.id === attendanceClassId);
-    if (!cls) return null;
-    const history = Array.isArray(cls.attendanceHistory) ? cls.attendanceHistory : [];
-    return (
-      <View style={styles.container}>
-        <View style={styles.headerRow}>
-          <Text style={styles.headerGreeting}>{cls.meta.subject} — Attendance History</Text>
-          <TouchableOpacity style={styles.logoutButton} onPress={() => { setView("class"); setOpenClassId(cls.id); }}>
-            <Text style={styles.logoutText}>Back</Text>
-          </TouchableOpacity>
-        </View>
-
-        <ScrollView style={{ marginTop: 12 }}>
-          {history.length === 0 && <Text style={styles.emptyText}>No attendance records</Text>}
-          {history.map((h) => (
-            <View key={h.date} style={{ paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
-              <Text style={{ fontWeight: "600" }}>{h.date}</Text>
-              <Text style={{ color: "#666", marginTop: 4 }}>Present: {Array.isArray(h.present) ? h.present.length : 0}</Text>
-              <Text style={{ color: "#666", marginTop: 2 }}>Absent: {Array.isArray(h.absent) ? h.absent.length : 0}</Text>
-              <View style={{ flexDirection: "row", marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: "#17a2b8", marginRight: 8 }]}
-                  onPress={() => openAttendance(cls.id, h.date)}
-                >
-                  <Text style={styles.addButtonText}>View</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          ))}
-        </ScrollView>
-      </View>
-    );
-  }
-
-  function renderHome() {
-    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.title}>Hello, {firstName}</Text>
-        <Text style={styles.subtitle}>Your teaching dashboard</Text>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() => onSignOut()}
-        >
-          <Text style={styles.buttonText}>Sign Out</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  // alias for compatibility with newer UI code that calls renderHomeView
-  function renderHomeView() {
-    return renderHome();
-  }
-
-  async function pickProfileImage() {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.8,
-        base64: true,
-      });
-      if (!result.canceled && result.assets && result.assets[0]) {
-        const asset = result.assets[0];
-        const base64 = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
-        setProfileImage(base64);
-      }
-    } catch (e) {
-      console.warn("pickProfileImage error", e);
-      Alert.alert("Error", "Could not pick image");
-    }
-  }
-
-  async function saveProfileChanges() {
-    // allow saving profile fields (name / image) without forcing password change
-    if (profilePassword && profilePasswordConfirm && profilePassword !== profilePasswordConfirm) {
-      Alert.alert("Validation", "Passwords do not match");
-      return;
-    }
-
-    try {
-      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-      const users = rawUsers ? JSON.parse(rawUsers) : {};
-
-      const existing = users[user.email] || {};
-      const updated = {
-        ...existing,
-        firstName: (profileFirstName || "").trim(),
-        lastName: (profileLastName || "").trim(),
-        profileImage: profileImage || existing.profileImage || null,
-      };
-      // only change password if provided
-      if (profilePassword) updated.password = profilePassword;
-
-      users[user.email] = updated;
-      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-
-      // update local state so UI reflects saved data
-      setUsersMap(users);
-      setProfileFirstName(updated.firstName || "");
-      setProfileLastName(updated.lastName || "");
-      setProfileImage(updated.profileImage || null);
-
-      // clear password inputs
-      setProfilePassword("");
-      setProfilePasswordConfirm("");
-
-      Alert.alert("Success", "Profile updated");
-    } catch (e) {
-      console.warn("saveProfileChanges error", e);
-      Alert.alert("Error", "Could not save profile");
-    }
-  }
-
-  // Profile view: account info + edit fields
-  function renderProfileView() {
-    return (
-      <View style={{ flex: 1, padding: 18, backgroundColor: "#fff" }}>
-        <ScrollView showsVerticalScrollIndicator={false}>
-          <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 16 }}>Profile</Text>
-          
-          <View style={{ alignItems: "center", marginBottom: 20 }}>
-            <TouchableOpacity
-              onPress={pickProfileImage}
-              style={{
-                width: 120,
-                height: 120,
-                borderRadius: 60,
-                backgroundColor: "#f0f0f0",
-                justifyContent: "center",
-                alignItems: "center",
-                borderWidth: 2,
-                borderColor: "#007bff",
-              }}
-            >
-              {profileImage ? (
-                <Image
-                  source={{ uri: profileImage }}
-                  style={{ width: "100%", height: "100%", borderRadius: 60 }}
-                  resizeMode="cover"
-                  onError={() => {
-                    console.warn("Profile image failed to load");
-                    setProfileImage(null);
-                  }}
-                />
-              ) : (
-                <Text style={{ fontSize: 48 }}>📷</Text>
-              )}
-            </TouchableOpacity>
-            <Text style={{ marginTop: 10, color: "#666", fontSize: 12 }}>Tap to change photo</Text>
-          </View>
-
-          {/* Account Info */}
-          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
-            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Account Information</Text>
-            
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>First Name</Text>
-            <TextInput
-              value={profileFirstName}
-              onChangeText={setProfileFirstName}
-              placeholder="First name"
-              style={[styles.input, { marginTop: 4 }]}
-            />
-
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Last Name</Text>
-            <TextInput
-              value={profileLastName}
-              onChangeText={setProfileLastName}
-              placeholder="Last name"
-              style={[styles.input, { marginTop: 4 }]}
-            />
-
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Email</Text>
-            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
-              <Text style={{ color: "#333" }}>{user && user.email}</Text>
-            </View>
-
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Role</Text>
-            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
-              <Text style={{ color: "#333" }}>{user && (user.role || "Teacher")}</Text>
-            </View>
-          </View>
-
-          {/* Change Password */}
-          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
-            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Change Password</Text>
-            
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>New Password</Text>
-            <TextInput
-              value={profilePassword}
-              onChangeText={setProfilePassword}
-              placeholder="Enter new password"
-              secureTextEntry
-              style={[styles.input, { marginTop: 4 }]}
-            />
-
-            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Confirm Password</Text>
-            <TextInput
-              value={profilePasswordConfirm}
-              onChangeText={setProfilePasswordConfirm}
-              placeholder="Confirm password"
-              secureTextEntry
-              style={[styles.input, { marginTop: 4 }]}
-            />
-          </View>
-
-          {/* Save & Sign Out */}
-          <TouchableOpacity
-            style={[styles.addButton, { backgroundColor: "#007bff", marginBottom: 12 }]}
-            onPress={saveProfileChanges}
-          >
-            <Text style={styles.addButtonText}>Save Changes</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.addButton, { backgroundColor: "#dc3545" }]}
-            onPress={() => onSignOut && onSignOut()}
-          >
-            <Text style={styles.addButtonText}>Sign Out</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-    );
-  }
-
-  // bottom nav UI (mobile-friendly) — ensure nav always takes effect by clearing overlays / views
-  function handleNavPress(tab) {
-    // switch selected tab
-    setSelectedTab(tab);
-    // move to top-level manage view so mainContent will render selectedTab
-    setView("manage");
-    // close any open chat overlay so nav is responsive
-    setChatOpen(false);
-    setChatTarget(null);
-    // clear open class detail so we return to top-level
-    setOpenClassId(null);
-  }
-
-  function renderBottomNav() {
-    const itemStyle = (active) => ({
-      flex: 1,
-      alignItems: "center",
-      justifyContent: "center",
-      paddingVertical: 8,
-      backgroundColor: active ? "#eef6ff" : "#fff",
-    });
-    const iconStyle = (active) => ({ fontSize: 18, color: active ? "#007bff" : "#666" });
-    const labelStyle = (active) => ({ fontSize: 12, color: active ? "#007bff" : "#666", marginTop: 4 });
-
-    return (
-      <View style={{ height: 64, flexDirection: "row", borderTopWidth: 1, borderTopColor: "#eee", backgroundColor: "#fff" }}>
-        <TouchableOpacity style={itemStyle(selectedTab === "home")} onPress={() => handleNavPress("home")}>
-          <Text style={iconStyle(selectedTab === "home")}>🏠</Text>
-          <Text style={labelStyle(selectedTab === "home")}>Home</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={itemStyle(selectedTab === "manage")} onPress={() => handleNavPress("manage")}>
-          <Text style={iconStyle(selectedTab === "manage")}>📚</Text>
-          <Text style={labelStyle(selectedTab === "manage")}>Manage</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={itemStyle(selectedTab === "profile")} onPress={() => handleNavPress("profile")}>
-          <Text style={iconStyle(selectedTab === "profile")}>👤</Text>
-          <Text style={labelStyle(selectedTab === "profile")}>Profile</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
- 
-   function renderManage() {
-     const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
-     return (
-       <View style={styles.container}>
-  
-         <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
-         <TouchableOpacity
-           style={styles.addButton}
-           onPress={() => setView("class")}
-         >
-           <Text style={styles.addButtonText}>Add Class</Text>
-         </TouchableOpacity>
-         <ScrollView>
-           {classesList.length === 0 && (
-             <Text style={styles.emptyText}>No classes found</Text>
-           )}
-           {classesList.map((cls) => (
-             <View key={cls.id} style={styles.classItem}>
-              <TouchableOpacity
-                onPress={() => openClass(cls.id)}
-                style={{ flex: 1 }}
-              >
-                <Text style={styles.classText}>{cls.meta.subject}</Text>
-                <Text style={styles.classText}>
-                  {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
-                </Text>
-              </TouchableOpacity>
-
-              <View style={{ flexDirection: "row", marginTop: 8 }}>
-                <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
-                  onPress={() => openClass(cls.id)}
-                >
-                  <Text style={styles.addButtonText}>Open</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
-                  onPress={() => handleClassDeletePress(cls.id)}
-                >
-                  <Text style={styles.addButtonText}>
-                    {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          ))}
-        </ScrollView>
-      </View>
-    );
    }
-
-  // helper: return normalized user record (guarantee firstName/lastName)
-  function normalizeUserRecord(u = {}, email) {
-    if (!u) return { email, firstName: null, lastName: null, gender: null, name: null };
-    if (u.firstName || u.lastName) return { ...u };
-    if (u.name && typeof u.name === "string") {
-      const parts = u.name.trim().split(/\s+/);
-      const last = parts.length > 1 ? parts.pop() : "";
-      const first = parts.join(" ") || "";
-      return { ...u, firstName: first || null, lastName: last || null };
-    }
-    return { ...u };
-  }
-
-  // display "Last, First" when available, otherwise email
-  function getDisplayNameForEmail(email) {
-    const uRaw = usersMap[email] || null;
-    const u = normalizeUserRecord(uRaw, email);
-    if (u.lastName && u.firstName) return `${u.lastName}, ${u.firstName}`;
-    if (u.lastName) return u.lastName;
-    if (u.firstName) return u.firstName;
-    if (u.name) return u.name;
-    return email;
-  }
-
-  // sort helper for students (by lastName, then firstName, then email)
-  function buildSortedStudentsArray(students = []) {
-    const arr = (students || []).map((s) => {
-      const em = typeof s === "string" ? s : s?.email;
-      const uRaw = usersMap[em] || null;
-      const u = normalizeUserRecord(uRaw, em);
-      return {
-        email: em,
-        firstName: (u.firstName || "").trim(),
-        lastName: (u.lastName || "").trim(),
-        display: getDisplayNameForEmail(em),
-      };
-    });
-    arr.sort((a, b) => {
-      const A = (a.lastName || "").toLowerCase();
-      const B = (b.lastName || "").toLowerCase();
-      if (A !== B) return A < B ? -1 : 1;
-      const Af = (a.firstName || "").toLowerCase();
-      const Bf = (b.firstName || "").toLowerCase();
-      if (Af !== Bf) return Af < Bf ? -1 : 1;
-      return (a.email || "").localeCompare(b.email || "");
-    });
-    return arr;
-  }
-
-  function renderClass() {
-    const cls = classesList.find((c) => c.id === openClassId);
-
-    // If there is no openClassId -> show the "Create Class" form
-    if (!cls) {
-      return (
-        <View style={styles.container}>
-          <Text style={styles.header}>Create Class</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Subject"
-            placeholderTextColor="#666"
-            value={subject}
-            onChangeText={setSubject}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Department"
-            placeholderTextColor="#666"
-            value={department}
-            onChangeText={setDepartment}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Year Level"
-            placeholderTextColor="#666"
-            value={yearLevel}
-            onChangeText={setYearLevel}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Block"
-            placeholderTextColor="#666"
-            value={block}
-            onChangeText={setBlock}
-          />
-          <TouchableOpacity style={styles.addButton} onPress={handleSaveClass}>
-            <Text style={styles.addButtonText}>Save Class</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.closeButton} onPress={() => setView("manage")}>
-            <Text style={styles.closeButtonText}>Cancel</Text>
-          </TouchableOpacity>
-        </View>
-      );
-    }
-
-    const sortedStudents = buildSortedStudentsArray(cls.students || []);
-    const filteredStudents = (studentSearchRemove || "").trim()
-      ? sortedStudents.filter((s) => s.display.toLowerCase().includes(studentSearchRemove.toLowerCase()))
-      : [];
-
-    return (
-      <View style={styles.container}>
-        <Text style={styles.header}>{cls.meta.subject}</Text>
-        <Text style={styles.metaText}>
-          {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
-        </Text>
-        <TouchableOpacity style={styles.closeButton} onPress={closeClass}>
-          <Text style={styles.closeButtonText}>Close</Text>
-        </TouchableOpacity>
-        <View style={styles.studentsContainer}>
-          <Text style={styles.subheader}>Students</Text>
-          <TextInput
-            value={studentSearchRemove}
-            onChangeText={setStudentSearchRemove}
-            placeholder="Search student to remove..."
-            style={[styles.input, { marginTop: 8 }]}
-          />
-          <ScrollView style={{ maxHeight: 200, marginTop: 8 }}>
-            {filteredStudents.length === 0 ? (
-              <Text style={styles.emptyText}>{studentSearchRemove ? "No students found" : "Type to search"}</Text>
-            ) : (
-              filteredStudents.map((s) => (
-                <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
-                  <Text style={styles.studentText}>{s.display}</Text>
-                  <TouchableOpacity
-                    style={[styles.addButton, { backgroundColor: "#dc3545", paddingVertical: 6, paddingHorizontal: 10 }]}
-                    onPress={() => removeStudentFromOpenClass(s.email)}
-                  >
-                    <Text style={styles.addButtonText}>Remove</Text>
-                  </TouchableOpacity>
-                </View>
-              ))
-           )}
-          </ScrollView>
-
-          <TextInput
-            style={styles.input}
-            placeholder="Enter student email"
-            value={newStudentEmail}
-            onChangeText={setNewStudentEmail}
-          />
-          <TouchableOpacity style={styles.addButton} onPress={handleAddStudent}>
-            <Text style={styles.addButtonText}>Add Student</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.addButton, { backgroundColor: "#17a2b8", marginTop: 8 }]}
-            onPress={() => openAttendance(cls.id)}
-          >
-            <Text style={styles.addButtonText}>Open Attendance</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.addButton, { backgroundColor: "#6f42c1", marginTop: 8 }]}
-            onPress={() => openAttendanceHistory(cls.id)}
-          >
-            <Text style={styles.addButtonText}>Attendance History</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.addButton, { backgroundColor: "#007bff", marginTop: 8 }]}
-            onPress={() => openClassChat(cls.id, user.email)}
-          >
-            <Text style={styles.addButtonText}>Chat</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
+  
   async function requestScannerPermission() {
     try {
       let res = { status: "undetermined", granted: false };
@@ -1220,13 +891,24 @@ export default function TeacherDashboard({ user, onSignOut }) {
       }
       setAttendanceState((prev) => ({ ...prev, [studentEmail]: true }));
       Alert.alert("Success", `${studentEmail} marked present`);
-      // close after short delay so alert + camera teardown don't race
-      setTimeout(() => setScannerVisible(false), 300);
+      // best-effort: mark present in Firestore
+      (async () => {
+        try {
+          const dateKey = attendanceDate || formatDateKey();
+          if (typeof markStudentPresent === "function") {
+            await markStudentPresent(user?.email || user?.uid, attendanceClassId, dateKey, studentEmail);
+          }
+        } catch (e) {
+          console.warn("markStudentPresent failed", e);
+        }
+      })();
+     // close after short delay so alert + camera teardown don't race
+     setTimeout(() => setScannerVisible(false), 300);
     } catch (err) {
       console.warn("handleBarCodeScanned error", err);
       setTimeout(() => setScannerVisible(false), 200);
     }
-   }
+  }
 
   function renderAttendance() {
     const cls = classesList.find((c) => c.id === attendanceClassId);
@@ -1365,16 +1047,494 @@ export default function TeacherDashboard({ user, onSignOut }) {
     );
   }
 
-  // compute main content based on state but keep bottom nav always visible
-  let mainContent = null;
-
-  if (loading) {
-    mainContent = (
+  // restore missing home view helpers used by mainContent
+  function renderHome() {
+    const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
+    return (
       <View style={styles.centered}>
-        <Text>Loading...</Text>
+        <Text style={styles.title}>Hello, {firstName}</Text>
+        <Text style={styles.subtitle}>Your teaching dashboard</Text>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => onSignOut && onSignOut()}
+        >
+          <Text style={styles.buttonText}>Sign Out</Text>
+        </TouchableOpacity>
       </View>
     );
-  } else if (view === "class") {
+  }
+
+  // alias retained for compatibility with code that calls renderHomeView
+  function renderHomeView() {
+    return renderHome();
+  }
+  
+  // restore navigation helpers that were removed — minimal and identical to original UI
+  function handleNavPress(tab) {
+    // switch selected tab and collapse overlays / open class
+    setSelectedTab(tab);
+    setView("manage");
+    setChatOpen(false);
+    setChatTarget(null);
+    setOpenClassId(null);
+  }
+
+  function renderBottomNav() {
+    const itemStyle = (active) => ({
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 8,
+      backgroundColor: active ? "#eef6ff" : "#fff",
+    });
+    const iconStyle = (active) => ({ fontSize: 18, color: active ? "#007bff" : "#666" });
+    const labelStyle = (active) => ({ fontSize: 12, color: active ? "#007bff" : "#666", marginTop: 4 });
+
+    return (
+      <View style={{ height: 64, flexDirection: "row", borderTopWidth: 1, borderTopColor: "#eee", backgroundColor: "#fff" }}>
+        <TouchableOpacity style={itemStyle(selectedTab === "home")} onPress={() => handleNavPress("home")}>
+          <Text style={iconStyle(selectedTab === "home")}>🏠</Text>
+          <Text style={labelStyle(selectedTab === "home")}>Home</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={itemStyle(selectedTab === "manage")} onPress={() => handleNavPress("manage")}>
+          <Text style={iconStyle(selectedTab === "manage")}>📚</Text>
+          <Text style={labelStyle(selectedTab === "manage")}>Manage</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={itemStyle(selectedTab === "profile")} onPress={() => handleNavPress("profile")}>
+          <Text style={iconStyle(selectedTab === "profile")}>👤</Text>
+          <Text style={labelStyle(selectedTab === "profile")}>Profile</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // restore renderProfileView (original-style: avatar, pick/upload, name/password fields, save, sign out)
+  function renderProfileView() {
+    // local image picker used by this view
+    async function pickProfileImage() {
+      try {
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.8,
+          base64: true,
+        });
+        // expo-image-picker v14+ uses result.canceled + result.assets[]
+        if (!result.canceled && result.assets && result.assets[0]) {
+          const asset = result.assets[0];
+          const base64 = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
+          setProfileImage(base64);
+        } else if (!result.cancelled && result.uri) {
+          // older versions return { cancelled, uri, base64 }
+          const base64 = result.base64 ? `data:image/jpeg;base64,${result.base64}` : result.uri;
+          setProfileImage(base64);
+        }
+      } catch (e) {
+        console.warn("pickProfileImage error", e);
+        Alert.alert("Error", "Could not pick image");
+      }
+    }
+
+    async function saveProfileChanges() {
+      // allow saving profile fields (name / image) without forcing password change
+      if (profilePassword && profilePasswordConfirm && profilePassword !== profilePasswordConfirm) {
+        Alert.alert("Validation", "Passwords do not match");
+        return;
+      }
+ 
+      try {
+         // keep existing local cache behavior (for backward compatibility)
+         const rawUsers = await AsyncStorage.getItem(USERS_KEY);
+         const users = rawUsers ? JSON.parse(rawUsers) : {};
+ 
+         const existing = users[user.email] || {};
+         const updated = {
+           ...existing,
+           firstName: (profileFirstName || "").trim(),
+           lastName: (profileLastName || "").trim(),
+           profileImage: profileImage || existing.profileImage || null,
+         };
+         // only change password if provided
+         if (profilePassword) updated.password = profilePassword;
+ 
+         users[user.email] = updated;
+         await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+ 
+         // update local state so UI reflects saved data
+         setUsersMap(users);
+         setProfileFirstName(updated.firstName || "");
+         setProfileLastName(updated.lastName || "");
+         setProfileImage(updated.profileImage || null);
+ 
+         // clear password inputs
+         setProfilePassword("");
+         setProfilePasswordConfirm("");
+ 
+         // best-effort: upload profile image (if data URI) and save to Firestore
+         let profileImageUrl = updated.profileImage || null;
+        if (profileImageUrl && typeof profileImageUrl === "string" && profileImageUrl.startsWith("data:")) {
+          // prefer helper when available, fallback to uploadString approach if helper fails or is absent
+          if (typeof uploadProfileImage === "function") {
+            try {
+              profileImageUrl = await uploadProfileImage(user.uid || user.email, profileImageUrl);
+            } catch (e) {
+              console.warn("uploadProfileImage failed, attempting fallback", e);
+              try {
+                profileImageUrl = await uploadProfileImageFallback(user.uid || user.email, profileImageUrl);
+              } catch (err) {
+                console.warn("uploadProfileImageFallback failed", err);
+              }
+            }
+          } else {
+            try {
+              profileImageUrl = await uploadProfileImageFallback(user.uid || user.email, profileImageUrl);
+            } catch (err) {
+              console.warn("uploadProfileImageFallback failed", err);
+            }
+          }
+        }
+ 
+         // save to remote DB: prefer helper; fallback to direct Firestore write
+         const payload = {
+           firstName: updated.firstName,
+           lastName: updated.lastName,
+           profileImage: profileImageUrl || updated.profileImage || null,
+           role: user.role || "Teacher",
+         };
+ 
+         try {
+           if (typeof saveUserProfile === "function") {
+             // helper should accept (id, payload) where id is uid or email
+             await saveUserProfile(user.uid || user.email, payload);
+           } else {
+             const db = getFirestore();
+             // ensure doc exists / update it
+             try {
+               await updateDoc(doc(db, "users", user.email), payload);
+             } catch (err) {
+               // if update fails (doc missing), create it
+               try {
+                 await setDoc(doc(db, "users", user.email), { ...payload, email: user.email });
+               } catch (err2) {
+                 console.warn("direct users write failed", err2);
+               }
+             }
+           }
+         } catch (e) {
+           console.warn("saveUserProfile failed in saveProfileChanges", e);
+         }
+ 
+         Alert.alert("Success", "Profile updated");
+       } catch (e) {
+         console.warn("saveProfileChanges error", e);
+         Alert.alert("Error", "Could not save profile");
+       }
+     }
+ 
+    return (
+      <View style={{ flex: 1, padding: 18, backgroundColor: "#fff" }}>
+        <ScrollView showsVerticalScrollIndicator={false}>
+          <Text style={{ fontSize: 20, fontWeight: "700", marginBottom: 16 }}>Profile</Text>
+          
+          <View style={{ alignItems: "center", marginBottom: 20 }}>
+            <TouchableOpacity
+              onPress={pickProfileImage}
+              style={{
+                width: 120,
+                height: 120,
+                borderRadius: 60,
+                backgroundColor: "#f0f0f0",
+                justifyContent: "center",
+                alignItems: "center",
+                borderWidth: 2,
+                borderColor: "#007bff",
+              }}
+            >
+              {profileImage ? (
+                <Image
+                  source={{ uri: profileImage }}
+                  style={{ width: "100%", height: "100%", borderRadius: 60 }}
+                  resizeMode="cover"
+                  onError={() => {
+                    console.warn("Profile image failed to load");
+                    setProfileImage(null);
+                  }}
+                />
+              ) : (
+                <Text style={{ fontSize: 48 }}>📷</Text>
+              )}
+            </TouchableOpacity>
+            <Text style={{ marginTop: 10, color: "#666", fontSize: 12 }}>Tap to change photo</Text>
+          </View>
+
+          {/* Account Info */}
+          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
+            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Account Information</Text>
+            
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>First Name</Text>
+            <TextInput
+              value={profileFirstName}
+              onChangeText={setProfileFirstName}
+              placeholder="First name"
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Last Name</Text>
+            <TextInput
+              value={profileLastName}
+              onChangeText={setProfileLastName}
+              placeholder="Last name"
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Email</Text>
+            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
+              <Text style={{ color: "#333" }}>{user && user.email}</Text>
+            </View>
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Role</Text>
+            <View style={[styles.input, { marginTop: 4, justifyContent: "center" }]}>
+              <Text style={{ color: "#333" }}>{user && (user.role || "Teacher")}</Text>
+            </View>
+          </View>
+
+          {/* Change Password */}
+          <View style={{ backgroundColor: "#f8f9fa", padding: 14, borderRadius: 10, marginBottom: 16 }}>
+            <Text style={{ fontWeight: "700", fontSize: 16, marginBottom: 12 }}>Change Password</Text>
+            
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 8 }}>New Password</Text>
+            <TextInput
+              value={profilePassword}
+              onChangeText={setProfilePassword}
+              placeholder="Enter new password"
+              secureTextEntry
+              style={[styles.input, { marginTop: 4 }]}
+            />
+
+            <Text style={{ color: "#666", fontSize: 12, marginTop: 12 }}>Confirm Password</Text>
+            <TextInput
+              value={profilePasswordConfirm}
+              onChangeText={setProfilePasswordConfirm}
+              placeholder="Confirm password"
+              secureTextEntry
+              style={[styles.input, { marginTop: 4 }]}
+            />
+          </View>
+
+          {/* Save & Sign Out */}
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#007bff", marginBottom: 12 }]}
+            onPress={() => {
+              if (typeof saveProfileChanges === "function") {
+                saveProfileChanges();
+              } else {
+                Alert.alert("Not available", "Save handler is missing");
+              }
+            }}
+          >
+            <Text style={styles.addButtonText}>Save Changes</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.addButton, { backgroundColor: "#dc3545" }]}
+            onPress={() => onSignOut && onSignOut()}
+          >
+            <Text style={styles.addButtonText}>Sign Out</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // restore renderManage (was removed) — shows list of classes and Add/Delete actions
+  function renderManage() {
+    return (
+      <View style={styles.container}>
+        <Text style={[styles.header, { marginTop: 8 }]}>Manage Classes</Text>
+        <TouchableOpacity
+          style={styles.addButton}
+          onPress={() => setView("class")}
+        >
+          <Text style={styles.addButtonText}>Add Class</Text>
+        </TouchableOpacity>
+        <ScrollView>
+          {classesList.length === 0 && (
+            <Text style={styles.emptyText}>No classes found</Text>
+          )}
+          {classesList.map((cls) => (
+            <View key={cls.id} style={styles.classItem}>
+              <TouchableOpacity onPress={() => openClass(cls.id)} style={{ flex: 1 }}>
+                <Text style={styles.classText}>{cls.meta?.subject}</Text>
+                <Text style={styles.classText}>
+                  {cls.meta?.department} - {cls.meta?.yearLevel} {cls.meta?.block}
+                </Text>
+              </TouchableOpacity>
+
+              <View style={{ flexDirection: "row", marginTop: 8 }}>
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: "#007bff", marginRight: 8 }]}
+                  onPress={() => openClass(cls.id)}
+                >
+                  <Text style={styles.addButtonText}>Open</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.addButton, { backgroundColor: pendingDeleteId === cls.id ? "#ff7b7b" : "#dc3545" }]}
+                  onPress={() => handleClassDeletePress(cls.id)}
+                >
+                  <Text style={styles.addButtonText}>
+                    {pendingDeleteId === cls.id ? "Confirm Delete" : "Delete"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // restore renderClass (was accidentally removed) — supports create + open class UI
+  function renderClass() {
+    const cls = classesList.find((c) => c.id === openClassId);
+
+    // If there is no openClassId -> show the "Create Class" form
+    if (!cls) {
+      return (
+        <View style={styles.container}>
+          <Text style={styles.header}>Create Class</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Subject"
+            placeholderTextColor="#666"
+            value={subject}
+            onChangeText={setSubject}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Department"
+            placeholderTextColor="#666"
+            value={department}
+            onChangeText={setDepartment}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Year Level"
+            placeholderTextColor="#666"
+            value={yearLevel}
+            onChangeText={setYearLevel}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Block"
+            placeholderTextColor="#666"
+            value={block}
+            onChangeText={setBlock}
+          />
+          <TouchableOpacity style={styles.addButton} onPress={handleSaveClass}>
+            <Text style={styles.addButtonText}>Save Class</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.closeButton} onPress={() => setView("manage")}>
+            <Text style={styles.closeButtonText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    const sortedStudents = buildSortedStudentsArray(cls.students || []);
+    const filteredStudents = (studentSearchRemove || "").trim()
+      ? sortedStudents.filter((s) => s.display.toLowerCase().includes(studentSearchRemove.toLowerCase()))
+      : [];
+
+    return (
+      <View style={styles.container}>
+        <Text style={styles.header}>{cls.meta.subject}</Text>
+        <Text style={styles.metaText}>
+          {cls.meta.department} - {cls.meta.yearLevel} {cls.meta.block}
+        </Text>
+
+        <TouchableOpacity style={styles.closeButton} onPress={closeClass}>
+          <Text style={styles.closeButtonText}>Close</Text>
+        </TouchableOpacity>
+
+        <View style={styles.studentsContainer}>
+          <Text style={styles.subheader}>Students</Text>
+
+          <TextInput
+            value={studentSearchRemove}
+            onChangeText={setStudentSearchRemove}
+            placeholder="Search student to remove..."
+            style={[styles.input, { marginTop: 8 }]}
+          />
+
+          <ScrollView style={{ maxHeight: 200, marginTop: 8 }}>
+            {filteredStudents.length === 0 ? (
+              <Text style={styles.emptyText}>{studentSearchRemove ? "No students found" : "Type to search"}</Text>
+            ) : (
+              filteredStudents.map((s) => (
+                <View key={s.email} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: "#eee" }}>
+                  <Text style={styles.studentText}>{s.display}</Text>
+                  <TouchableOpacity
+                    style={[styles.addButton, { backgroundColor: "#dc3545", paddingVertical: 6, paddingHorizontal: 10 }]}
+                    onPress={() => removeStudentFromOpenClass(s.email)}
+                  >
+                    <Text style={styles.addButtonText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ))
+           )}
+          </ScrollView>
+
+          <TextInput
+            style={styles.input}
+            placeholder="Enter student email (type manually)"
+            value={newStudentEmail}
+            onChangeText={setNewStudentEmail}
+            autoCorrect={false}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            textContentType="none"        // disables iOS autofill suggestions
+            autoComplete="off"            // RN >= 0.66
+            importantForAutofill="no"     // Android autofill hint
+          />
+
+         {/* Add Student + quick actions (Open Attendance / History / Chat) */}
+         <View style={{ marginTop: 12 }}>
+           <TouchableOpacity style={styles.addButton} onPress={handleAddStudent}>
+             <Text style={styles.addButtonText}>Add Student</Text>
+           </TouchableOpacity>
+
+           <TouchableOpacity
+             style={[styles.addButton, { backgroundColor: "#17a2b8", marginTop: 8 }]}
+             onPress={() => openAttendance(cls.id)}
+           >
+             <Text style={styles.addButtonText}>Open Attendance</Text>
+           </TouchableOpacity>
+
+           <TouchableOpacity
+             style={[styles.addButton, { backgroundColor: "#6f42c1", marginTop: 8 }]}
+             onPress={() => openAttendanceHistory(cls.id)}
+           >
+             <Text style={styles.addButtonText}>Attendance History</Text>
+           </TouchableOpacity>
+
+           <TouchableOpacity
+             style={[styles.addButton, { backgroundColor: "#007bff", marginTop: 8 }]}
+             onPress={() => openClassChat(cls.id, user.email)}
+           >
+             <Text style={styles.addButtonText}>Chat</Text>
+           </TouchableOpacity>
+         </View>
+        </View>
+      </View>
+    );
+  }
+
+  let mainContent = null;
+  if (view === "class") {
     mainContent = renderClass();
   } else if (view === "attendance") {
     mainContent = renderAttendance();

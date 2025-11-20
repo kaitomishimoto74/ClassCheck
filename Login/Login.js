@@ -11,8 +11,7 @@ import {
   Image,
   Alert,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { registerWithEmailPassword, loginWithEmailPassword, getUserProfile } from '../src/firebase/firebaseService';
+import { registerWithEmailPassword, loginWithEmailPassword, getUserProfile, saveUserProfile } from '../src/firebase/firebaseService';
 import Register from './Register';
 import StudentDashboard from '../Dashboard/StudentDashboard';
 import TeacherDashboard from '../Dashboard/TeacherDashboard';
@@ -28,24 +27,11 @@ export default function Login() {
   const [showRegister, setShowRegister] = useState(false);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const token = await AsyncStorage.getItem(AUTH_KEY);
-        if (token) {
-          const raw = await AsyncStorage.getItem(USERS_KEY);
-          const users = raw ? JSON.parse(raw) : {};
-          const details = users[token];
-          if (details) setUser({ email: token, name: details.name, role: details.role });
-        }
-      } catch (e) {
-        console.warn('Login init error', e);
-      } finally {
-        setLoading(false);
-      }
-    })();
+    // No local credential cache: rely on Firebase auth & Firestore profile.
+    setLoading(false);
   }, []);
 
-  // SIGN IN: try Firebase auth first, then fallback to local AsyncStorage
+  // SIGN IN: use Firebase auth and Firestore profile (no AsyncStorage)
   const signIn = async () => {
     if (!email || !password) {
       Alert.alert('Validation', 'Please enter email and password');
@@ -53,12 +39,12 @@ export default function Login() {
     }
     setLoading(true);
     try {
-      // Try Firebase login first (best-effort)
+      // Try Firebase login first
       try {
         const fbUser = await loginWithEmailPassword((email || '').trim(), password);
         const emailKey = (email || '').trim().toLowerCase();
 
-        // try to fetch profile from Firestore using uid (preferred) then fallback to email key
+        // fetch profile from Firestore using uid (preferred) then fallback to email key
         let profile = null;
         try {
           profile = await getUserProfile(fbUser.uid || emailKey);
@@ -66,72 +52,47 @@ export default function Login() {
           console.warn('getUserProfile failed', e);
         }
 
-        // merge profile into local users store
-        const usersRaw = await AsyncStorage.getItem(USERS_KEY);
-        const users = usersRaw ? JSON.parse(usersRaw) : {};
-        const existing = users[emailKey] || {};
-        const firstName = profile?.firstName ?? existing.firstName ?? '';
-        const lastName = profile?.lastName ?? existing.lastName ?? '';
-        const roleVal = profile?.role ?? existing.role ?? 'Student';
-        const genderVal = profile?.gender ?? existing.gender ?? null;
-        const classesVal = Array.isArray(profile?.classes) ? profile.classes : (existing.classes || []);
+        // Build user object from remote profile (no local storage)
+        const firstName = profile?.firstName ?? '';
+        const lastName = profile?.lastName ?? '';
+        const roleVal = profile?.role ?? 'Student';
+        const genderVal = profile?.gender ?? null;
+        const classesVal = Array.isArray(profile?.classes) ? profile.classes : [];
 
-        users[emailKey] = {
-          ...existing,
+        const userObj = {
           email: emailKey,
+          name: (firstName || lastName) ? `${firstName} ${lastName}`.trim() : '',
+          role: roleVal,
           firstName,
           lastName,
-          name: (firstName || lastName) ? `${firstName} ${lastName}`.trim() : (existing.name || ''),
-          role: roleVal,
           gender: genderVal,
           classes: classesVal,
-          syncedAt: new Date().toISOString(),
+          uid: fbUser?.uid || null,
         };
 
-        await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-        await AsyncStorage.setItem(AUTH_KEY, emailKey);
+        setUser(userObj);
 
-        setUser({
-          email: emailKey,
-          name: users[emailKey].name,
-          role: users[emailKey].role,
-          firstName: users[emailKey].firstName,
-          lastName: users[emailKey].lastName,
-          gender: users[emailKey].gender,
-          classes: users[emailKey].classes,
-        });
+        // persist canonical profile to Firestore (merge) - no passwords stored
+        try {
+          await saveUserProfile(fbUser.uid || emailKey, {
+            email: fbUser.email || emailKey,
+            firstName,
+            lastName,
+            role: roleVal,
+            classes: classesVal,
+          });
+        } catch (e) {
+          console.warn('saveUserProfile after login failed', e);
+        }
 
         setLoading(false);
         return;
       } catch (fbErr) {
-        console.warn('Firebase login failed, falling back to local', fbErr);
-      }
-
-      // Fallback: local AsyncStorage auth (unchanged)
-      const raw = await AsyncStorage.getItem(USERS_KEY);
-      const users = raw ? JSON.parse(raw) : {};
-      const account = users[email];
-      if (!account) {
-        Alert.alert('Authentication failed', 'No account found for this email.');
+        console.warn('Firebase login failed', fbErr);
+        Alert.alert('Authentication failed', 'Unable to sign in. Please check your credentials and network.');
         setLoading(false);
         return;
       }
-      if (account.password !== password) {
-        Alert.alert('Authentication failed', 'Invalid credentials.');
-        setLoading(false);
-        return;
-      }
-
-      await AsyncStorage.setItem(AUTH_KEY, email);
-      setUser({
-        email,
-        name: account.name || `${account.firstName || ''} ${account.lastName || ''}`.trim(),
-        role: account.role || 'Student',
-        firstName: account.firstName || null,
-        lastName: account.lastName || null,
-        gender: account.gender || null,
-        classes: Array.isArray(account.classes) ? account.classes : [],
-      });
     } catch (err) {
       console.warn('signIn error', err);
       Alert.alert('Error', 'Unable to sign in. Try again.');
@@ -141,7 +102,7 @@ export default function Login() {
   };
 
   const signOut = async () => {
-    await AsyncStorage.removeItem(AUTH_KEY);
+    // clear in-memory session; Firebase signOut can be called elsewhere if needed
     setUser(null);
     setEmail('');
     setPassword('');
@@ -170,7 +131,7 @@ export default function Login() {
           // after registering return to login and prefill email & role
           setShowRegister(false);
           if (created?.email) setEmail(created.email);
-          if (created?.role) setSelectedRole(created.role);
+          // do not try to setSelectedRole (it doesn't exist in this component)
           Alert.alert('Registered', 'Account created — please login.');
         }}
         onCancel={() => setShowRegister(false)}
