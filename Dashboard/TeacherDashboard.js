@@ -317,28 +317,54 @@ export default function TeacherDashboard({ user, onSignOut }) {
     return [];
   }
 
+  // normalize a user record for display/lookup (safe defaults)
+  function normalizeUserRecord(raw, fallbackEmail) {
+    const r = raw || {};
+    const email = String(r.email || fallbackEmail || "").toLowerCase();
+    const firstName = r.firstName || r.first || (r.name ? String(r.name).split(" ")[0] : "") || "";
+    const lastName = r.lastName || r.last || "";
+    const name = r.name || ((firstName || lastName) ? `${firstName} ${lastName}`.trim() : "") || email;
+    const gender = r.gender || "";
+    const uid = r.uid || r.id || "";
+    return { ...r, email, firstName, lastName, name, gender, uid };
+  }
+  
   // build sorted students array for UI (uses usersMap when available)
   function buildSortedStudentsArray(students) {
     const arr = (students || [])
       .map((s) => {
         if (!s) return null;
+
+        // helper to lookup user by email (case-insensitive)
+        const lookupUserByEmail = (email) => {
+          const key = (email || "").toString().toLowerCase();
+          return (
+            usersMap[key] ||
+            usersMap[email] ||
+            Object.values(usersMap).find((u) => u && u.email && u.email.toLowerCase() === key) ||
+            null
+          );
+        };
+
         if (typeof s === "string") {
           const email = s;
-          const u = usersMap[email] || {};
-          const first = u.firstName || (u.name ? u.name.split(" ")[0] : "");
-          const last = u.lastName || "";
-          const display = `${first} ${last}`.trim() || email;
+          const u = lookupUserByEmail(email) || {};
+          const first = u.firstName || u.first || (u.name ? u.name.split(" ")[0] : "");
+          const last = u.lastName || u.last || "";
+          // prefer "Last, First" when both available
+          const display = last && first ? `${last}, ${first}` : (first || last ? `${first} ${last}`.trim() : email);
           return { email, display };
         } else {
           const email = s.email || (s.uid || "");
-          const display =
-            s.display ||
-            `${s.firstName || s.name || ""} ${s.lastName || ""}`.trim() ||
-            email;
+          const u = lookupUserByEmail(email) || s || {};
+          const first = s.firstName || s.first || u.firstName || u.first || (u.name ? u.name.split(" ")[0] : "");
+          const last = s.lastName || s.last || u.lastName || u.last || "";
+          const display = last && first ? `${last}, ${first}` : (first || last ? `${first} ${last}`.trim() : email);
           return { email, display };
         }
       })
       .filter(Boolean);
+
     arr.sort((a, b) => (a.display || "").toString().localeCompare((b.display || "").toString()));
     return arr;
   }
@@ -375,14 +401,34 @@ export default function TeacherDashboard({ user, onSignOut }) {
       const emails = new Set();
       arr.forEach((c) => (c.students || []).forEach((s) => {
         const em = typeof s === "string" ? s : s?.email;
-        if (em) emails.add(em);
+        if (em) emails.add(String(em).toLowerCase());
       }));
+
+      // Query users collection by email for each enrolled student (best-effort)
       for (const em of Array.from(emails)) {
         try {
-          const ud = await getDocFirestore(doc(db, "users", em));
-          if (ud && ud.exists()) users[em] = ud.data();
+          // prefer querying by email field (users docs are keyed by uid)
+          const q = query(collection(db, "users"), where("email", "==", em));
+          const qSnap = await getDocs(q);
+          if (!qSnap.empty) {
+            const ud = qSnap.docs[0];
+            const data = ud.data() || {};
+            // store by normalized email so lookups are consistent
+            users[em] = { ...data, email: data.email || em };
+            continue;
+          }
         } catch (e) {
-          // ignore per-user failures
+          // ignore per-user query failure
+        }
+
+        // fallback: try doc lookup using the raw email string (in case some installs stored by email as doc id)
+        try {
+          const ud = await getDocFirestore(doc(db, "users", em));
+          if (ud && ud.exists()) {
+            users[em] = ud.data() || { email: em };
+          }
+        } catch (e) {
+          // ignore
         }
       }
       setUsersMap(users);
@@ -687,6 +733,30 @@ export default function TeacherDashboard({ user, onSignOut }) {
     setNewStudentEmail("");
   }
 
+  // open attendance view for a class (sets date to today)
+  function openAttendance(classId) {
+    setAttendanceClassId(classId);
+    // prefer existing helper formatDateKey if present, otherwise build YYYY-MM-DD
+    const dateKey =
+      typeof formatDateKey === "function"
+        ? formatDateKey()
+        : (() => {
+            const d = new Date();
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, "0");
+            const dd = String(d.getDate()).padStart(2, "0");
+            return `${yyyy}-${mm}-${dd}`;
+          })();
+    setAttendanceDate(dateKey);
+    setView("attendance");
+  }
+
+  // open attendance history view for a class
+  function openAttendanceHistory(classId) {
+    setAttendanceClassId(classId);
+    setView("attendanceHistory");
+  }
+
   // double-press confirm delete for a class
   function handleClassDeletePress(classId) {
     // if same id pressed within timeout => execute delete
@@ -918,6 +988,84 @@ export default function TeacherDashboard({ user, onSignOut }) {
     }
   }
 
+  // toggle a student's present/absent state in current attendance view
+  function toggleAttendance(email) {
+    setAttendanceState((prev) => {
+      const next = { ...(prev || {}) };
+      next[email] = !next[email];
+      return next;
+    });
+  }
+
+  // persist attendance for the open attendanceClassId + attendanceDate
+  async function saveAttendance() {
+    if (!attendanceClassId) {
+      Alert.alert("Error", "No class selected");
+      return;
+    }
+
+    // determine date key
+    const dateKey =
+      attendanceDate ||
+      (typeof formatDateKey === "function"
+        ? formatDateKey()
+        : (() => {
+            const d = new Date();
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, "0");
+            const dd = String(d.getDate()).padStart(2, "0");
+            return `${yyyy}-${mm}-${dd}`;
+          })());
+
+    const cls = (classesList || []).find((c) => String(c.id) === String(attendanceClassId));
+    if (!cls) {
+      Alert.alert("Error", "Class not found");
+      return;
+    }
+
+    // build attendance map (email => boolean)
+    const attendanceMap = {};
+    (cls.students || []).forEach((s) => {
+      const em = typeof s === "string" ? s : s?.email;
+      if (em) {
+        attendanceMap[em] = !!attendanceState[em];
+      }
+    });
+
+    // update local classesList (attendance per-date)
+    try {
+      const updated = (classesList || []).map((c) => {
+        if (String(c.id) !== String(cls.id)) return c;
+        return {
+          ...c,
+          attendance: { ...(c.attendance || {}), [dateKey]: attendanceMap },
+        };
+      });
+
+      // persist locally + attempt remote sync
+      await persistClasses(updated);
+
+      // remote: prefer helper markAttendance, otherwise direct write to classes doc
+      try {
+        if (typeof markAttendance === "function") {
+          await markAttendance(cls.id, dateKey, attendanceMap);
+        } else {
+          const db = getFirestore();
+          await updateDoc(doc(db, "classes", cls.id), {
+            attendance: { ...(cls.attendance || {}), [dateKey]: attendanceMap },
+          });
+        }
+      } catch (e) {
+        console.warn("saveAttendance remote update failed", e);
+      }
+
+      Alert.alert("Saved", "Attendance saved");
+    } catch (e) {
+      console.warn("saveAttendance failed", e);
+      Alert.alert("Error", "Could not save attendance");
+    }
+  }
+
   function renderAttendance() {
     const cls = classesList.find((c) => c.id === attendanceClassId);
     if (!cls) return null;
@@ -1055,7 +1203,63 @@ export default function TeacherDashboard({ user, onSignOut }) {
     );
   }
 
-  // restore missing home view helpers used by mainContent
+  // render attendance history list for the selected class
+  function renderAttendanceHistory() {
+    const cls = classesList.find((c) => c.id === attendanceClassId);
+    if (!cls) return null;
+
+    const attendance = cls.attendance || {};
+    const dates = Object.keys(attendance || {}).sort((a, b) => (a < b ? 1 : -1)); // newest first
+
+    return (
+      <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <Text style={styles.headerGreeting}>
+            {cls.meta?.subject} — Attendance History
+          </Text>
+          <TouchableOpacity onPress={() => setView("class")} style={{ padding: 8 }}>
+            <Text style={{ color: "#007bff", fontWeight: "700" }}>Back</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView style={{ marginTop: 12 }}>
+          {dates.length === 0 && <Text style={styles.emptyText}>No attendance records found</Text>}
+
+          {dates.map((dateKey) => {
+            const map = attendance[dateKey] || {};
+            const total = Object.keys(map).length;
+            const present = Object.values(map).filter(Boolean).length;
+            return (
+              <TouchableOpacity
+                key={dateKey}
+                onPress={() => {
+                  // open the single-date attendance view
+                  setAttendanceDate(dateKey);
+                  setView("attendance");
+                }}
+                style={{
+                  padding: 12,
+                  borderBottomWidth: 1,
+                  borderBottomColor: "#eee",
+                  flexDirection: "row",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <View>
+                  <Text style={{ fontWeight: "600" }}>{dateKey}</Text>
+                  <Text style={{ color: "#666", marginTop: 4 }}>{present} present · {total} total</Text>
+                </View>
+                <Text style={{ color: "#007bff", fontWeight: "700" }}>View</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+    );
+  }
+  
+  // restore renderHome (continues)...
   function renderHome() {
     const firstName = (user && (user.firstName || (user.name ? user.name.split(" ")[0] : null))) || "Teacher";
     return (
@@ -1539,6 +1743,35 @@ export default function TeacherDashboard({ user, onSignOut }) {
         </View>
       </View>
     );
+  }
+
+  // helper: return "Last, First" if available, otherwise fallback to name or email
+  function getStudentDisplay(student) {
+    // student may be a string email or an object { email, firstName, lastName, name, uid }
+    let email = null;
+    let first = null;
+    let last = null;
+    if (!student) return "";
+    if (typeof student === "string") {
+      email = student;
+    } else if (typeof student === "object") {
+      email = student.email || student.uid || null;
+      first = student.firstName || student.first || null;
+      last = student.lastName || student.last || null;
+    }
+    const normalizedEmail = (email || "").toString().toLowerCase();
+
+    // try direct lookup in usersMap by email or normalized email
+    const u = usersMap[normalizedEmail] || usersMap[email] || Object.values(usersMap).find((x) => (x && x.email && x.email.toLowerCase() === normalizedEmail));
+    const userObj = u || (typeof student === "object" ? student : null);
+
+    const fn = first || userObj?.firstName || userObj?.first || null;
+    const ln = last || userObj?.lastName || userObj?.last || null;
+
+    if (ln && fn) return `${ln}, ${fn}`;
+    if (fn || ln) return `${fn || ""} ${ln || ""}`.trim();
+    if (userObj && userObj.name) return userObj.name;
+    return email || "";
   }
 
   let mainContent = null;
