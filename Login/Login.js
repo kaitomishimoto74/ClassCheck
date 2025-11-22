@@ -10,6 +10,8 @@ import {
   Platform,
   Image,
   Alert,
+  Modal,
+  ScrollView,
 } from 'react-native';
 import { registerWithEmailPassword, loginWithEmailPassword, getUserProfile, saveUserProfile } from '../src/firebase/firebaseService';
 import Register from './Register';
@@ -25,6 +27,7 @@ export default function Login() {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState(null);
   const [showRegister, setShowRegister] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   useEffect(() => {
     // No local credential cache: rely on Firebase auth & Firestore profile.
@@ -179,6 +182,59 @@ export default function Login() {
         >
           <Text style={styles.secondaryText}>Create account</Text>
         </TouchableOpacity>
+
+        {/* About ClassCheck button (below Create account) */}
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={[styles.button, styles.aboutButton]}
+          onPress={() => setShowAbout(true)}
+        >
+          <Text style={[styles.secondaryText, { color: '#fff' }]}>About Us</Text>
+        </TouchableOpacity>
+
+        {/* About modal */}
+        <Modal visible={showAbout} animationType="slide" transparent onRequestClose={() => setShowAbout(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>About ClassCheck</Text>
+              <ScrollView contentContainerStyle={styles.modalContent}>
+                <Text style={styles.paragraph}>
+                  ClassCheck is a smart and modern attendance-tracking solution designed to make school management simple, accurate, and efficient. Our goal is to help teachers save time, help students stay informed, and help schools stay organized.
+                </Text>
+                <Text style={styles.paragraph}>
+                  With built-in real-time chat, ClassCheck also improves communication between teachers and students, making class coordination easier than ever.
+                </Text>
+                <Text style={styles.paragraph}>
+                  We believe that technology should simplify education—and ClassCheck is our step toward achieving that.
+                </Text>
+
+                <Text style={[styles.sectionTitle, { marginTop: 12 }]}>Submitted By:</Text>
+                <View style={styles.aboutList}>
+                  {[
+                    "Aro, Kian Kenneth Torrejas",
+                    "Bermoy, Ina Marie",
+                    "Daan, Christopher Naquines",
+                    "Docdoc, Dominique Omolon",
+                    "Galleto, Almer Kilfer",
+                    "Jamago, Alexandria",
+                    "Lumactao, Charlene",
+                    "Misiona, Jovan Mondaya",
+                    "Najos, Anjeaneth Bequilla",
+                    "Payot, Michael Dave",
+                  ].map((n, i) => (
+                    <Text key={i} style={styles.aboutItem}>• {n}</Text>
+                  ))}
+                </View>
+
+                <Text style={[styles.submitToText, { marginTop: 12 }]}>Submitted To: Camelotes, Jay Ian F.</Text>
+              </ScrollView>
+
+              <TouchableOpacity style={styles.modalCloseBtn} onPress={() => setShowAbout(false)} activeOpacity={0.8}>
+                <Text style={styles.modalCloseText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
       </View>
     </KeyboardAvoidingView>
   );
@@ -254,5 +310,82 @@ const styles = StyleSheet.create({
     color: '#FF69B4',
     fontWeight: '600',
     fontSize: 16,
+  },
+  aboutButton: {
+    backgroundColor: '#6c757d',
+    marginTop: 8,
+    // subtle shadow to match theme
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    width: '100%',
+    maxHeight: '86%',
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 16,
+    alignItems: 'stretch',
+    shadowColor: '#FF69B4',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 12,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FF69B4',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  modalContent: {
+    paddingBottom: 12,
+  },
+  paragraph: {
+    fontSize: 14,
+    color: '#333',
+    lineHeight: 20,
+    marginBottom: 8,
+    textAlign: 'left',
+  },
+  sectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#444',
+    marginBottom: 6,
+  },
+  aboutList: {
+    paddingLeft: 6,
+  },
+  aboutItem: {
+    fontSize: 13,
+    color: '#333',
+    marginBottom: 4,
+  },
+  submitToText: {
+    fontSize: 13,
+    color: '#222',
+    fontWeight: '600',
+  },
+  modalCloseBtn: {
+    marginTop: 12,
+    backgroundColor: '#FF69B4',
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  modalCloseText: {
+    color: '#fff',
+    fontWeight: '700',
   },
 });
