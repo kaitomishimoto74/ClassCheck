@@ -48,6 +48,31 @@ import { getStorage, ref as storageRef, uploadString, getDownloadURL } from "fir
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
+// helper: stable id for classes (prefer explicit id or meta.id)
+function stableClassId(c, fallback) {
+  if (!c) return String(fallback || "").trim() || null;
+  return c.id || c._id || (c.meta && c.meta.id) || String(fallback || "").trim() || null;
+}
+
+// normalize key (email/owner)
+function normKey(v) {
+  return (v || "").toString().toLowerCase();
+}
+
+// dedupe classes by stable id and prefer entries with more fields
+function uniqueClasses(list = []) {
+  const byId = {};
+  (Array.isArray(list) ? list : []).forEach((c) => {
+    if (!c) return;
+    const id = stableClassId(c) || JSON.stringify(c);
+    if (!id) return;
+    const exist = byId[id];
+    if (!exist) byId[id] = { ...c, id };
+    else byId[id] = { ...exist, ...c, id }; // merge, prefer incoming non-empty fields
+  });
+  return Object.values(byId);
+}
+
 export default function TeacherDashboard({ user, onSignOut }) {
   // UI / navigation — default to Manage as main screen
   const [view, setView] = useState("manage"); // home | class | manage | open
@@ -1061,15 +1086,74 @@ export default function TeacherDashboard({ user, onSignOut }) {
       // persist locally + attempt remote sync
       await persistClasses(updated);
 
-      // remote: prefer helper markAttendance, otherwise direct write to classes doc
+      // remote: prefer helper markAttendance, otherwise merge into the existing class doc
       try {
         if (typeof markAttendance === "function") {
           await markAttendance(cls.id, dateKey, attendanceMap);
         } else {
           const db = getFirestore();
-          await updateDoc(doc(db, "classes", cls.id), {
-            attendance: { ...(cls.attendance || {}), [dateKey]: attendanceMap },
-          });
+          let targetRef = null;
+
+          // 1) If cls.id exists and a doc with that id exists -> update it
+          if (cls.id) {
+            const candidateRef = doc(db, "classes", String(cls.id));
+            try {
+              const snap = await getDocFirestore(candidateRef);
+              if (snap && snap.exists()) {
+                targetRef = candidateRef;
+              }
+            } catch (_) {
+              // ignore and try search
+              targetRef = null;
+            }
+          }
+
+          // 2) If not found by id, try to locate a class doc by owner + meta fields (best-effort)
+          if (!targetRef) {
+            try {
+              const constraints = [where("owner", "==", user?.email || "")];
+              if (cls.meta?.subject) constraints.push(where("meta.subject", "==", cls.meta.subject));
+              if (cls.meta?.department) constraints.push(where("meta.department", "==", cls.meta.department));
+              if (cls.meta?.yearLevel) constraints.push(where("meta.yearLevel", "==", cls.meta.yearLevel));
+              if (cls.meta?.block) constraints.push(where("meta.block", "==", cls.meta.block));
+
+              // build a query only with available constraints (Firestore accepts nested where)
+              const q = query(collection(db, "classes"), ...constraints);
+              const qSnap = await getDocs(q);
+              if (!qSnap.empty) {
+                const foundDoc = qSnap.docs[0];
+                targetRef = doc(db, "classes", foundDoc.id);
+              }
+            } catch (e) {
+              // ignore search errors
+            }
+          }
+
+          // 3) Merge attendance into the found doc; if none found, create or set with merge to avoid duplicates
+          if (targetRef) {
+            try {
+              const remoteSnap = await getDocFirestore(targetRef);
+              const remoteData = (remoteSnap && remoteSnap.exists()) ? (remoteSnap.data() || {}) : {};
+              const mergedAttendance = { ...(remoteData.attendance || {}), [dateKey]: attendanceMap };
+              // use setDoc with merge to avoid overwriting other fields
+              await setDoc(targetRef, { attendance: mergedAttendance }, { merge: true });
+            } catch (e) {
+              console.warn("saveAttendance: update existing class doc failed", e);
+            }
+          } else {
+            // no matching doc found -> create a single canonical doc (addDoc) to hold this class record
+            try {
+              await addDoc(collection(db, "classes"), {
+                meta: cls.meta || {},
+                students: cls.students || [],
+                attendance: { [dateKey]: attendanceMap },
+                owner: user?.email || "",
+                createdAt: new Date().toISOString(),
+              });
+            } catch (e) {
+              console.warn("saveAttendance: creating new class doc failed", e);
+            }
+          }
         }
       } catch (e) {
         console.warn("saveAttendance remote update failed", e);

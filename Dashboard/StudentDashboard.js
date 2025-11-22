@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import {
   View,
   Text,
@@ -16,13 +16,17 @@ import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
 import { uploadProfileImage, saveUserProfile, fetchClassesForStudent } from "../src/firebase/firebaseService";
+import { getFirestore, collection, query, where, onSnapshot, getDocs } from "firebase/firestore";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
 export default function StudentDashboard({ user, onSignOut }) {
-  // normalize current user email for comparisons and remote queries
-  const email = ((user && user.email) || "").toLowerCase();
+  const classesUnsubRef = useRef(null);
+  // cache to avoid repeated Firestore lookups for teacher emails
+  const fetchedTeacherCacheRef = useRef(new Set());
+   // normalize current user email for comparisons and remote queries
+   const email = ((user && user.email) || "").toLowerCase();
 
   // UI / navigation
   const [selectedTab, setSelectedTab] = useState("home");
@@ -49,39 +53,175 @@ export default function StudentDashboard({ user, onSignOut }) {
       loadData();
     }
   }, []);
-
+  
   async function loadData() {
     setLoading(true);
     try {
-      const rawUsers = await AsyncStorage.getItem(USERS_KEY);
-      const users = rawUsers ? JSON.parse(rawUsers) : {};
-      setUsersMap(users);
+      // robust AsyncStorage read: if the stored blob is too large (CursorWindow) remove it and continue.
+      let users = {};
+      try {
+        const rawUsers = await AsyncStorage.getItem(USERS_KEY);
+        if (rawUsers && rawUsers.length > 150_000) {
+          // very large payloads can cause Android CursorWindow errors — drop the local cache
+          console.warn("USERS_KEY too large in AsyncStorage, clearing local cache to avoid CursorWindow errors");
+          await AsyncStorage.removeItem(USERS_KEY);
+          users = {};
+        } else {
+          users = rawUsers ? JSON.parse(rawUsers) : {};
+        }
+      } catch (err) {
+        console.warn("read USERS_KEY failed, removing corrupted cache and continuing", err);
+        try { await AsyncStorage.removeItem(USERS_KEY); } catch (_) {}
+        users = {};
+      }
+       // sanitize huge data URIs (avoid CursorWindow / large-row issues)
+       Object.entries(users || {}).forEach(([k, v]) => {
+         if (v && typeof v.profileImage === "string") {
+           const pi = v.profileImage;
+           // remove inline base64 images or extremely large values (they should be uploaded instead)
+           if (pi.startsWith("data:") || pi.length > 150_000) {
+             v.profileImage = null;
+           }
+         }
+       });
+      // normalize users map keys by lowercased email for consistent lookups
+      const normUsers = {};
+      Object.entries(users || {}).forEach(([k, v]) => {
+        const em = (v && (v.email || k)) || k;
+        if (em) normUsers[String(em).toLowerCase()] = v || {};
+      });
+      setUsersMap(normUsers);
 
-      const rawClasses = await AsyncStorage.getItem(CLASSES_KEY);
-      const classes = rawClasses ? JSON.parse(rawClasses) : {};
-      setAllClassesMap(classes);
+      // read classes with similar protection
+      let classes = {};
+      try {
+        const rawClasses = await AsyncStorage.getItem(CLASSES_KEY);
+        if (rawClasses && rawClasses.length > 500_000) {
+          console.warn("CLASSES_KEY too large in AsyncStorage, clearing local cache to avoid CursorWindow errors");
+          await AsyncStorage.removeItem(CLASSES_KEY);
+          classes = {};
+        } else {
+          classes = rawClasses ? JSON.parse(rawClasses) : {};
+        }
+      } catch (err) {
+        console.warn("read CLASSES_KEY failed, removing corrupted cache and continuing", err);
+        try { await AsyncStorage.removeItem(CLASSES_KEY); } catch (_) {}
+        classes = {};
+      }
 
-      // attempt to sync remote classes for this student (best-effort)
+      // helper: stable class id
+      const stableId = (c, fallbackId) => {
+        if (!c) return String(fallbackId || "").trim() || null;
+        return c.id || c._id || (c.meta && c.meta.id) || String(fallbackId || "").trim() || null;
+      };
+
+      // normalize class owner keys and dedupe classes by stable id per owner
+      const normalizedClasses = {};
+      Object.entries(classes || {}).forEach(([ownerKey, arr]) => {
+        const owner = (ownerKey || "").toString().toLowerCase();
+        const list = Array.isArray(arr) ? arr : [];
+        const byId = {};
+        list.forEach((c) => {
+          if (!c) return;
+          const id = stableId(c);
+          if (!id) return; // skip malformed entries
+          // ensure stored object has canonical id field
+          byId[id] = { ...c, id };
+        });
+        normalizedClasses[owner] = Object.values(byId);
+      });
+      setAllClassesMap(normalizedClasses);
+
+      // seed with fetchClassesForStudent if available (normalizing ids)
+      let mergedSeed = { ...(normalizedClasses || {}) };
       try {
         if (typeof fetchClassesForStudent === "function" && email) {
           const remoteMap = await fetchClassesForStudent(email);
-          // merge remote results into local classes map (remote takes precedence for those owners)
-          const merged = { ...(classes || {}) };
-          Object.keys(remoteMap || {}).forEach((owner) => {
-            merged[owner] = remoteMap[owner];
+          Object.entries(remoteMap || {}).forEach(([ownerKey, arr]) => {
+            const owner = (ownerKey || "").toString().toLowerCase();
+            const existing = Array.isArray(mergedSeed[owner]) ? mergedSeed[owner] : [];
+            const byId = {};
+            existing.forEach((c) => { const id = stableId(c); if (id) byId[id] = { ...c, id }; });
+            (Array.isArray(arr) ? arr : []).forEach((c) => {
+              if (!c) return;
+              const id = stableId(c);
+              if (!id) return;
+              byId[id] = { ...c, id };
+            });
+            mergedSeed[owner] = Object.values(byId);
           });
-          await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(merged));
-          setAllClassesMap(merged);
+          await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(mergedSeed));
+          setAllClassesMap(mergedSeed);
         }
       } catch (e) {
-        console.warn("sync remote classes failed", e);
+        console.warn("seed remote classes failed", e);
+      }
+
+      // subscribe to Firestore classes where student email is enrolled (real-time sync)
+      try {
+        const db = getFirestore();
+        // NOTE: array-contains requires exact match; try both lowercase and raw email just in case
+        const q = query(collection(db, "classes"), where("students", "array-contains", email));
+        if (classesUnsubRef.current) {
+          try { classesUnsubRef.current(); } catch (_) {}
+          classesUnsubRef.current = null;
+        }
+        const unsub = onSnapshot(q, (snap) => {
+          // build remote map grouped by owner (normalize owner key)
+          const remoteMap = {};
+          snap.docs.forEach((d) => {
+            const c = d.data() || {};
+            const ownerRaw = (c.ownerEmail || c.owner || (c.meta && c.meta.owner) || "").toString().toLowerCase() || "unknown";
+            const owner = ownerRaw;
+            const id = d.id || stableId(c, d.id);
+            if (!remoteMap[owner]) remoteMap[owner] = {};
+            // ensure canonical id field
+            remoteMap[owner][id] = { id, ...c };
+          });
+
+          // functional update to merge with current state (avoid stale closure)
+          setAllClassesMap((prev) => {
+            const base = { ...(prev || {}) };
+
+            // merge remoteMap into base, remote takes precedence for those owners
+            Object.entries(remoteMap).forEach(([owner, idMap]) => {
+              const existing = Array.isArray(base[owner]) ? base[owner] : [];
+              const byId = {};
+              existing.forEach((c) => { const id = stableId(c); if (id) byId[id] = { ...c, id }; });
+              Object.entries(idMap).forEach(([id, c]) => { if (!id) return; byId[id] = { ...c, id }; });
+              base[owner] = Object.values(byId);
+            });
+
+            // also ensure no duplicate class entries across owners by id
+            // build global seen set and filter duplicates (keep first occurrence)
+            const seenGlobal = new Set();
+            Object.keys(base).forEach((owner) => {
+              base[owner] = (base[owner] || []).filter((c) => {
+                const id = stableId(c);
+                if (!id) return false;
+                if (seenGlobal.has(id)) return false;
+                seenGlobal.add(id);
+                return true;
+              });
+            });
+
+            // persist a copy (best-effort)
+            AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(base)).catch(() => {});
+            return base;
+          });
+        }, (err) => {
+          console.warn("classes snapshot failed", err);
+        });
+        classesUnsubRef.current = unsub;
+      } catch (e) {
+        console.warn("setup classes listener failed", e);
       }
 
       // sync profile from stored user
-      const currentUser = users[email] || {};
+      const currentUser = normUsers[email] || {};
       setProfileFirstName(currentUser.firstName || user.firstName || "");
       setProfileLastName(currentUser.lastName || user.lastName || "");
-      setProfileImage(currentUser.profileImage || null);
+      setProfileImage(currentUser.profileImage || user.profileImage || null);
     } catch (e) {
       console.warn("load student dashboard data", e);
     } finally {
@@ -111,25 +251,45 @@ export default function StudentDashboard({ user, onSignOut }) {
 
   async function saveProfileChanges() {
     try {
-      const raw = await AsyncStorage.getItem(USERS_KEY);
-      const users = raw ? JSON.parse(raw) : {};
+      // load current map (best-effort; guard against CursorWindow)
+      let users = {};
+      try {
+        const raw = await AsyncStorage.getItem(USERS_KEY);
+        users = raw ? JSON.parse(raw) : {};
+      } catch (e) {
+        console.warn("read USERS_KEY failed in saveProfileChanges, continuing with empty map", e);
+        users = {};
+      }
+
       const existing = users[user.email] || {};
-      const updated = { ...existing, firstName: profileFirstName, lastName: profileLastName, profileImage: profileImage || existing.profileImage || null };
-      users[user.email] = updated;
-      await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-      setUsersMap(users);
-      // upload image first if data-uri
-      if (updated.profileImage && typeof updated.profileImage === "string" && updated.profileImage.startsWith("data:") && typeof uploadProfileImage === "function") {
+      const updated = { ...existing, firstName: profileFirstName, lastName: profileLastName };
+
+      // If user selected a data URI image, upload first and replace with URL before persisting.
+      if (profileImage && typeof profileImage === "string" && profileImage.startsWith("data:") && typeof uploadProfileImage === "function") {
         try {
-          const url = await uploadProfileImage(user.uid || user.email, updated.profileImage);
-          updated.profileImage = url || updated.profileImage;
-          users[user.email] = updated;
-          await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
-          setUsersMap(users);
+          const url = await uploadProfileImage(user.uid || user.email, profileImage);
+          updated.profileImage = url || null;
         } catch (e) {
           console.warn("uploadProfileImage failed in StudentDashboard", e);
+          // avoid storing the large data URI locally; fallback to existing image if any
+          updated.profileImage = existing.profileImage || null;
         }
+      } else {
+        // not a data-uri: accept as-is (likely already a URL) or null
+        updated.profileImage = profileImage || existing.profileImage || null;
       }
+
+      // persist sanitized map (ensure we do not store raw data URIs)
+      users[user.email] = updated;
+      try {
+        await AsyncStorage.setItem(USERS_KEY, JSON.stringify(users));
+      } catch (e) {
+        console.warn("saving USERS_KEY failed (possibly too large), skipping local cache", e);
+      }
+      // update local state with normalized key
+      setUsersMap((prev) => ({ ...(prev || {}), [user.email.toLowerCase()]: updated }));
+
+      // save to remote user profile if helper exists
       if (typeof saveUserProfile === "function") {
         try { await saveUserProfile(user.uid || user.email, updated); } catch (e) { console.warn("saveUserProfile failed in StudentDashboard", e); }
       }
@@ -143,16 +303,23 @@ export default function StudentDashboard({ user, onSignOut }) {
   // gather classes where this student is enrolled
   const classesForStudent = useMemo(() => {
     const res = [];
+    const seen = new Set();
     Object.entries(allClassesMap || {}).forEach(([ownerEmail, arr]) => {
+      const owner = (ownerEmail || "").toString().toLowerCase();
       const list = Array.isArray(arr) ? arr : [];
       list.forEach((c) => {
+        if (!c) return;
+        const classId = c.id || JSON.stringify(c);
+        // avoid pushing duplicate class ids
+        if (seen.has(classId)) return;
         const students = Array.isArray(c.students) ? c.students : [];
         const found = students.some((s) => {
           const em = typeof s === "string" ? s : s?.email;
           return (typeof em === "string" ? em.toLowerCase() : "") === email;
         });
         if (found) {
-          res.push({ cls: c, ownerEmail });
+          seen.add(classId);
+          res.push({ cls: c, ownerEmail: owner });
         }
       });
     });
@@ -165,12 +332,65 @@ export default function StudentDashboard({ user, onSignOut }) {
     return res;
   }, [allClassesMap, email]);
 
+  // fetch user document by email and merge into usersMap (background)
+  async function fetchAndCacheUserByEmail(emailToFetch) {
+    if (!emailToFetch) return;
+    const em = String(emailToFetch).toLowerCase();
+    if (usersMap[em] || fetchedTeacherCacheRef.current.has(em)) return;
+    fetchedTeacherCacheRef.current.add(em);
+    try {
+      const db = getFirestore();
+      const q = query(collection(db, "users"), where("email", "==", em));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const docSnap = snap.docs[0];
+        const u = docSnap.data() || {};
+        // merge into usersMap (keep normalized lowercase email key)
+        setUsersMap((prev) => ({ ...(prev || {}), [em]: u }));
+      }
+    } catch (err) {
+      // ignore background fetch errors
+      console.warn("fetchAndCacheUserByEmail failed", err);
+    }
+  }
+
   function getTeacherDisplay(ownerEmail, cls) {
-    const instructor = (cls.meta && cls.meta.instructor) || ownerEmail;
-    const t = usersMap[instructor] || usersMap[ownerEmail] || {};
-    if (t.lastName && t.firstName) return `${t.lastName}, ${t.firstName}`;
-    if (t.firstName || t.lastName) return `${t.firstName || ""} ${t.lastName || ""}`.trim();
-    return t.name || instructor;
+    // prefer explicit instructor metadata if present
+    const meta = cls && cls.meta ? cls.meta : {};
+    let instructorRaw = meta.instructor || meta.instructorEmail || ownerEmail || "";
+    // if meta.instructor looks like a full name (has space), prefer it
+    if (typeof meta.instructor === "string" && meta.instructor.trim().includes(" ")) {
+      return meta.instructor.trim();
+    }
+
+    const key = (String(instructorRaw || ownerEmail || "")).toLowerCase();
+    const t = usersMap[key] || {};
+
+    // If we have explicit first/last use them
+    if (t.firstName || t.lastName) {
+      return `${(t.firstName || "").trim()} ${(t.lastName || "").trim()}`.trim();
+    }
+    if (t.name) return t.name;
+
+    // If class metadata contains instructor name fields, use them
+    if (meta.instructorFirstName || meta.instructorLastName || meta.instructorName) {
+      const candidate = `${(meta.instructorFirstName || "").trim()} ${(meta.instructorLastName || "").trim()}`.trim() || (meta.instructorName || "");
+      if (candidate) return candidate;
+    }
+
+    // show a friendly fallback instead of raw email:
+    // if email-like, show part before '@' with capitalization
+    if (key.includes("@")) {
+      const local = key.split("@")[0].replace(/[._\-]/g, " ");
+      const human = local.split(/\s+/).map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
+      // background fetch user document to replace fallback soon
+      fetchAndCacheUserByEmail(key).catch(() => {});
+      return human;
+    }
+
+    // last resort: trigger background fetch and show ownerEmail as-is
+    fetchAndCacheUserByEmail(key).catch(() => {});
+    return String(instructorRaw || ownerEmail || "Teacher");
   }
 
   function gatherDatesForClass(c) {
@@ -298,10 +518,10 @@ export default function StudentDashboard({ user, onSignOut }) {
         <ScrollView style={{ marginTop: 8 }}>
           {classesForStudent.length === 0 && <Text style={styles.emptyText}>You are not enrolled in any classes</Text>}
           {classesForStudent.map(({ cls, ownerEmail }) => {
-            const stats = computeStats(cls);
-            const teacher = getTeacherDisplay(ownerEmail, cls);
-            return (
-              <View key={cls.id} style={styles.classItem}>
+             const stats = computeStats(cls);
+             const teacher = getTeacherDisplay(ownerEmail, cls);
+             return (
+              <View key={`${(ownerEmail || "").toString().toLowerCase()}:${cls.id}`} style={styles.classItem}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.classText}>{cls.meta?.subject || "(no subject)"}</Text>
                   <Text style={styles.metaText}>{teacher}</Text>

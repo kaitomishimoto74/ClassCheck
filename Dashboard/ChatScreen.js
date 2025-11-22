@@ -48,6 +48,52 @@ export default function ChatScreen(props) {
 
   const db = getFirestore();
 
+  // cache fetched user profiles by email to avoid repeated queries
+  const userProfileCacheRef = useRef({});
+
+  // enrich messages with sender profileImage when missing
+  async function enrichProfiles(msgs = []) {
+    try {
+      const missing = new Set();
+      msgs.forEach((m) => {
+        const em = (m.senderEmail || "").toString().toLowerCase();
+        if (!em) return;
+        if ((!m.senderProfile || !m.senderProfile.profileImage) && !userProfileCacheRef.current[em]) {
+          missing.add(em);
+        }
+      });
+      if (missing.size === 0) return;
+
+      for (const em of Array.from(missing)) {
+        try {
+          const q = query(collection(db, "users"), where("email", "==", em));
+          const qSnap = await getDocs(q);
+          if (!qSnap.empty) {
+            userProfileCacheRef.current[em] = qSnap.docs[0].data() || null;
+          } else {
+            userProfileCacheRef.current[em] = null;
+          }
+        } catch (e) {
+          userProfileCacheRef.current[em] = null;
+        }
+      }
+
+      // patch in-memory messages with any found profileImage
+      setMessages((prev) =>
+        (prev || []).map((m) => {
+          const em = (m.senderEmail || "").toString().toLowerCase();
+          const cached = userProfileCacheRef.current[em];
+          if (cached && cached.profileImage && (!m.senderProfile || !m.senderProfile.profileImage)) {
+            return { ...m, senderProfile: { ...(m.senderProfile || {}), profileImage: cached.profileImage } };
+          }
+          return m;
+        })
+      );
+    } catch (err) {
+      console.warn("enrichProfiles failed", err);
+    }
+  }
+
   useEffect(() => {
     loadParticipantsFromFirestore();
     return cleanupSubscription;
@@ -170,6 +216,8 @@ export default function ChatScreen(props) {
         const rows = [];
         snap.forEach((d) => rows.push({ id: d.id, ...d.data() }));
         setMessages(rows);
+        // best-effort: enrich loaded messages with profile images from users collection
+        enrichProfiles(rows);
         setTimeout(() => flatRef.current && flatRef.current.scrollToEnd && flatRef.current.scrollToEnd({ animated: true }), 50);
       }, (err) => {
         console.warn("messages listen error", err);
@@ -314,6 +362,9 @@ export default function ChatScreen(props) {
   function renderItem({ item }) {
     const mine = ((item.senderEmail || "").toLowerCase() === (currentUser?.email || "").toLowerCase());
     const sender = item.senderProfile || {};
+    // fallback to cached profile if message lacks profileImage
+    const cached = userProfileCacheRef.current[(item.senderEmail || "").toLowerCase()];
+    const profileImage = sender.profileImage || (cached && cached.profileImage) || null;
     const body = (item.text || "").toString();
     const initials = (() => {
       const fn = (sender.firstName || "").trim();
@@ -323,8 +374,8 @@ export default function ChatScreen(props) {
       return (item.senderEmail && item.senderEmail.charAt(0)) || "?";
     })();
 
-    const Avatar = sender.profileImage ? (
-      <Image source={{ uri: sender.profileImage }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+    const Avatar = profileImage ? (
+      <Image source={{ uri: profileImage }} style={{ width: 36, height: 36, borderRadius: 18 }} />
     ) : (
       <View style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: "#ddd", justifyContent: "center", alignItems: "center" }}>
         <Text style={{ fontSize: 12, color: "#444", fontWeight: "700" }}>{initials.toUpperCase()}</Text>
