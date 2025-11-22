@@ -329,42 +329,58 @@ export default function TeacherDashboard({ user, onSignOut }) {
     return { ...r, email, firstName, lastName, name, gender, uid };
   }
   
-  // build sorted students array for UI (uses usersMap when available)
+  // build sorted students array for UI (dedupe by normalized email; prefer name fields when available)
   function buildSortedStudentsArray(students) {
-    const arr = (students || [])
-      .map((s) => {
-        if (!s) return null;
+    const map = new Map();
 
-        // helper to lookup user by email (case-insensitive)
-        const lookupUserByEmail = (email) => {
-          const key = (email || "").toString().toLowerCase();
-          return (
-            usersMap[key] ||
-            usersMap[email] ||
-            Object.values(usersMap).find((u) => u && u.email && u.email.toLowerCase() === key) ||
-            null
-          );
-        };
+    const lookupUserByEmail = (email) => {
+      const key = (email || "").toString().toLowerCase();
+      return (
+        usersMap[key] ||
+        usersMap[email] ||
+        Object.values(usersMap).find((u) => u && u.email && u.email.toLowerCase() === key) ||
+        null
+      );
+    };
 
-        if (typeof s === "string") {
-          const email = s;
-          const u = lookupUserByEmail(email) || {};
-          const first = u.firstName || u.first || (u.name ? u.name.split(" ")[0] : "");
-          const last = u.lastName || u.last || "";
-          // prefer "Last, First" when both available
-          const display = last && first ? `${last}, ${first}` : (first || last ? `${first} ${last}`.trim() : email);
-          return { email, display };
-        } else {
-          const email = s.email || (s.uid || "");
-          const u = lookupUserByEmail(email) || s || {};
-          const first = s.firstName || s.first || u.firstName || u.first || (u.name ? u.name.split(" ")[0] : "");
-          const last = s.lastName || s.last || u.lastName || u.last || "";
-          const display = last && first ? `${last}, ${first}` : (first || last ? `${first} ${last}`.trim() : email);
-          return { email, display };
+    (students || []).forEach((s) => {
+      if (!s) return;
+      let rawEmail = "";
+      let first = "";
+      let last = "";
+      let name = "";
+
+      if (typeof s === "string") {
+        rawEmail = s;
+      } else {
+        rawEmail = s.email || s.uid || "";
+        first = s.firstName || s.first || "";
+        last = s.lastName || s.last || "";
+        name = s.name || "";
+      }
+
+      const email = String(rawEmail || "").toLowerCase();
+      const user = lookupUserByEmail(email) || (typeof s === "object" ? s : null) || {};
+      // prefer explicit fields from user object if available
+      const fn = first || user.firstName || user.first || (user.name ? user.name.split(" ")[0] : "") || "";
+      const ln = last || user.lastName || user.last || "";
+      const display = ln && fn ? `${ln}, ${fn}` : (fn || ln ? `${fn} ${ln}`.trim() : (user.name || email));
+
+      // if map already has an entry, prefer one that contains actual names
+      if (map.has(email)) {
+        const existing = map.get(email);
+        // replace if existing is just email but current has a proper name
+        const existingLooksLikeEmail = existing.display === existing.email;
+        const currentHasName = display && display !== email;
+        if (currentHasName && (existingLooksLikeEmail || existing.display.length < display.length)) {
+          map.set(email, { email, display });
         }
-      })
-      .filter(Boolean);
+      } else {
+        map.set(email, { email, display });
+      }
+    });
 
+    const arr = Array.from(map.values());
     arr.sort((a, b) => (a.display || "").toString().localeCompare((b.display || "").toString()));
     return arr;
   }
@@ -1229,12 +1245,20 @@ export default function TeacherDashboard({ user, onSignOut }) {
             const map = attendance[dateKey] || {};
             const total = Object.keys(map).length;
             const present = Object.values(map).filter(Boolean).length;
+            const absent = Math.max(0, total - present);
+
             return (
               <TouchableOpacity
                 key={dateKey}
                 onPress={() => {
-                  // open the single-date attendance view
+                  // pre-fill the attendanceState with recorded values so the attendance view shows statuses
+                  const normalized = {};
+                  Object.keys(map).forEach((k) => {
+                    normalized[k] = !!map[k];
+                  });
+                  setAttendanceState(normalized);
                   setAttendanceDate(dateKey);
+                  setAttendanceClassId(cls.id);
                   setView("attendance");
                 }}
                 style={{
@@ -1248,7 +1272,9 @@ export default function TeacherDashboard({ user, onSignOut }) {
               >
                 <View>
                   <Text style={{ fontWeight: "600" }}>{dateKey}</Text>
-                  <Text style={{ color: "#666", marginTop: 4 }}>{present} present · {total} total</Text>
+                  <Text style={{ color: "#666", marginTop: 4 }}>
+                    {present} present · {absent} absent · {total} total
+                  </Text>
                 </View>
                 <Text style={{ color: "#007bff", fontWeight: "700" }}>View</Text>
               </TouchableOpacity>
