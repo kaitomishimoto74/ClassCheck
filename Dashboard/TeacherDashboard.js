@@ -731,9 +731,11 @@ export default function TeacherDashboard({ user, onSignOut }) {
       return;
     }
     
+    // declare to hold found student uid/docId
+    let studentDocId = null;
+
     try {
       const db = getFirestore();
-  
       // fetch latest class doc
       const classRef = doc(db, "classes", openClassId);
       const classSnap = await getDocFirestore(classRef);
@@ -743,17 +745,22 @@ export default function TeacherDashboard({ user, onSignOut }) {
         return;
       }
       const cls = { id: classSnap.id, ...classSnap.data() };
-  
+
       // ensure student is registered in users collection
       try {
-        const userRef = doc(db, "users", email);
-        const userSnap = await getDocFirestore(userRef);
-        if (!userSnap || !userSnap.exists()) {
+        // find the user doc by email (users collection uses uid doc ids, not email-based ids)
+        const q = query(collection(db, "users"), where("email", "==", email));
+        const qSnap = await getDocs(q);
+        if (qSnap.empty) {
           Alert.alert("Not registered", "Student email not found or not registered as a student");
           return;
         }
-        const registered = userSnap.data();
-        if (registered && registered.role && String(registered.role).toLowerCase() !== "student") {
+        const userDoc = qSnap.docs[0];
+        const registered = userDoc.data() || {};
+        studentDocId = userDoc.id; // <-- save uid/doc id for later use
+
+        // role check: must be exactly "Student" (first letter capital)
+        if (String(registered.role || "").trim() !== "Student") {
           Alert.alert("Not registered", "Student email not found or not registered as a student");
           return;
         }
@@ -790,7 +797,8 @@ export default function TeacherDashboard({ user, onSignOut }) {
   
       // Add class meta to student user doc classes[] entry (best-effort)
       try {
-        const userRef = doc(db, "users", email);
+        // use found studentDocId (uid) instead of email as doc id
+        const userRef = doc(db, "users", studentDocId || email);
         const userSnap = await getDocFirestore(userRef);
         if (userSnap && userSnap.exists()) {
           const u = userSnap.data();
@@ -801,7 +809,7 @@ export default function TeacherDashboard({ user, onSignOut }) {
             const newClasses = [...(u.classes || []), meta];
             await updateDoc(userRef, { classes: newClasses });
             if (typeof saveUserProfile === "function") {
-              try { await saveUserProfile(u.uid || email, { ...u, classes: newClasses }); } catch (_) {}
+              try { await saveUserProfile(u.uid || studentDocId || email, { ...u, classes: newClasses }); } catch (_) {}
             }
           }
         }

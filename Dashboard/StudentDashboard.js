@@ -15,13 +15,14 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import ChatScreen from "./ChatScreen";
 import * as ImagePicker from "expo-image-picker";
 import QRCode from "react-native-qrcode-svg";
-import { uploadProfileImage, saveUserProfile } from "../src/firebase/firebaseService";
+import { uploadProfileImage, saveUserProfile, fetchClassesForStudent } from "../src/firebase/firebaseService";
 
 const CLASSES_KEY = "classes";
 const USERS_KEY = "users";
 
 export default function StudentDashboard({ user, onSignOut }) {
-  const email = (user && user.email) || "";
+  // normalize current user email for comparisons and remote queries
+  const email = ((user && user.email) || "").toLowerCase();
 
   // UI / navigation
   const [selectedTab, setSelectedTab] = useState("home");
@@ -59,6 +60,22 @@ export default function StudentDashboard({ user, onSignOut }) {
       const rawClasses = await AsyncStorage.getItem(CLASSES_KEY);
       const classes = rawClasses ? JSON.parse(rawClasses) : {};
       setAllClassesMap(classes);
+
+      // attempt to sync remote classes for this student (best-effort)
+      try {
+        if (typeof fetchClassesForStudent === "function" && email) {
+          const remoteMap = await fetchClassesForStudent(email);
+          // merge remote results into local classes map (remote takes precedence for those owners)
+          const merged = { ...(classes || {}) };
+          Object.keys(remoteMap || {}).forEach((owner) => {
+            merged[owner] = remoteMap[owner];
+          });
+          await AsyncStorage.setItem(CLASSES_KEY, JSON.stringify(merged));
+          setAllClassesMap(merged);
+        }
+      } catch (e) {
+        console.warn("sync remote classes failed", e);
+      }
 
       // sync profile from stored user
       const currentUser = users[email] || {};
@@ -132,7 +149,7 @@ export default function StudentDashboard({ user, onSignOut }) {
         const students = Array.isArray(c.students) ? c.students : [];
         const found = students.some((s) => {
           const em = typeof s === "string" ? s : s?.email;
-          return em === email;
+          return (typeof em === "string" ? em.toLowerCase() : "") === email;
         });
         if (found) {
           res.push({ cls: c, ownerEmail });

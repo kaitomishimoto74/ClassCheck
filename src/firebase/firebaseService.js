@@ -7,7 +7,7 @@ import {
   signOut as fbSignOut,
   onAuthStateChanged,
 } from "firebase/auth";
-import { getFirestore, doc, setDoc, getDoc, deleteDoc, serverTimestamp, runTransaction, onSnapshot, arrayUnion, updateDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, getDoc, deleteDoc, serverTimestamp, runTransaction, onSnapshot, arrayUnion, updateDoc, collection, query, where, getDocs } from "firebase/firestore";
 import { getStorage, ref as storageRef, uploadString, getDownloadURL } from "firebase/storage";
 import ReactNativeAsyncStorage from "@react-native-async-storage/async-storage";
 import { firebaseConfig } from "./firebaseConfig";
@@ -223,15 +223,45 @@ export async function createOrUpdateClass(cls) {
 
 export async function addStudentToClass(classId, studentEmail) {
   if (!db) throw new Error("Firestore not initialized");
+  if (!classId) throw new Error("missing classId");
+  if (!studentEmail || typeof studentEmail !== "string") throw new Error("invalid student email");
+
   const cref = doc(db, "classes", classId);
+
+  // normalize email (UI already lowercases but make sure here)
+  const normalizedEmail = String(studentEmail).trim().toLowerCase();
+
+  // Find the user doc by email because users docs are keyed by uid
+  const usersCol = collection(db, "users");
+  const q = query(usersCol, where("email", "==", normalizedEmail));
+  const qSnap = await getDocs(q);
+  if (qSnap.empty) throw new Error("student user not found");
+  const studentDoc = qSnap.docs[0];
+  const sref = doc(db, "users", studentDoc.id);
+
   await runTransaction(db, async (tx) => {
-    const snap = await tx.get(cref);
-    if (!snap.exists()) throw new Error("class not found");
-    const data = snap.data();
-    const students = Array.isArray(data.students) ? [...data.students] : [];
-    if (!students.includes(studentEmail)) students.push(studentEmail);
+    const [classSnap, studentSnap] = await Promise.all([tx.get(cref), tx.get(sref)]);
+    if (!classSnap.exists()) throw new Error("class not found");
+    if (!studentSnap.exists()) throw new Error("student user not found");
+
+    const sdata = studentSnap.data() || {};
+    // enforce role must be exactly "Student" (capitalized first letter)
+    if (String(sdata.role || "").trim() !== "Student") throw new Error("user is not a Student");
+
+    const cdata = classSnap.data() || {};
+    // update class.students (store normalized lowercase email)
+    const students = Array.isArray(cdata.students) ? [...cdata.students.map((e) => (typeof e === "string" ? e.toLowerCase() : e))] : [];
+    if (!students.includes(normalizedEmail)) students.push(normalizedEmail);
     tx.update(cref, { students });
+
+    // update student's profile so class shows up in their "My classes"
+    const studentClasses = Array.isArray(sdata.classes) ? [...sdata.classes] : [];
+    const classRefObj = { id: classId, owner: cdata.owner || cdata.ownerEmail || null, meta: cdata.meta || cdata.title || null };
+    const alreadyAdded = studentClasses.some((c) => c && c.id === classId);
+    if (!alreadyAdded) studentClasses.push(classRefObj);
+    tx.set(sref, { classes: studentClasses }, { merge: true });
   });
+
   return true;
 }
 
@@ -270,4 +300,29 @@ export async function uploadProfileImage(userIdOrEmail, base64DataUri) {
     // ignore
   }
   return url;
+}
+
+export async function fetchClassesForStudent(studentEmail) {
+  if (!db) throw new Error("Firestore not initialized");
+  if (!studentEmail || typeof studentEmail !== "string") return {};
+
+  const normalizedEmail = String(studentEmail).trim().toLowerCase();
+
+  try {
+    // query classes where students array contains this email (stored normalized)
+    const classesCol = collection(db, "classes");
+    const q = query(classesCol, where("students", "array-contains", normalizedEmail));
+    const qSnap = await getDocs(q);
+    const map = {};
+    qSnap.forEach((docSnap) => {
+      const c = { id: docSnap.id, ...(docSnap.data() || {}) };
+      const owner = (c.owner || c.ownerEmail || c.meta?.instructor || "unknown").toString();
+      if (!map[owner]) map[owner] = [];
+      map[owner].push(c);
+    });
+    return map;
+  } catch (e) {
+    console.warn("fetchClassesForStudent failed", e);
+    return {};
+  }
 }
